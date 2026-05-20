@@ -1,0 +1,8 @@
+# Code owners for plug-zammad.
+#
+# Until ownership is formally agreed in the Zammad Linear project,
+# all paths are reviewed by the Dataplattform team.
+#
+# Update this file as soon as that decision is made (see Linear DA-XX).
+
+*  @plugport/dataplattform
