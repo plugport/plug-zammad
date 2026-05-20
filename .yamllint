@@ -1,0 +1,11 @@
+---
+extends: default
+
+rules:
+  line-length:
+    max: 120
+  # `on:` is required by GitHub Actions and parses as YAML 1.1 truthy.
+  truthy:
+    check-keys: false
+  # `---` is optional in our files; don't enforce either way.
+  document-start: disable
