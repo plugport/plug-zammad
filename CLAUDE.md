@@ -378,7 +378,7 @@ Hybrid model — two repos, one workload.
 | Repo | Owns | Workflows |
 |---|---|---|
 | `plugport/plug-zammad` (this repo) | `Dockerfile`, Plug overlays, `docs/`, `CLAUDE.md`, `.env.example`, app deploy CI | `.github/workflows/ci.yml`, `.github/workflows/deploy.yml` |
-| `evinyacp/az-0265-infra` | All Terraform (modules `network`, `identity`, `data`, `apps`, `ai`), env config under `envs/prd/` | `.github/workflows/terraform.yml` (plan-on-PR, apply-on-main) |
+| `evinyacp/az-0265-infra` | All Terraform — flat layout under `infrastructure/`, scaffolded by Eviny ACP | `plan.yml` (plan-on-PR) + `apply.yml` (apply-on-main). **Currently broken — DA-95.** Local `terraform apply` is the interim path; see `docs/features/infra-runbook.md`. |
 | `evinyacp/eviny-dns` | DNS zone `plugport.no` (Terraform) | post-merge `terraform apply` |
 
 Cross-repo coupling:
