@@ -1,49 +1,54 @@
 # Post-install runbook
 
-Every Container Apps deploy that introduces a fresh Zammad install or a version bump needs a handful of Rails-console settings to be written to the database. They are **not** environment variables — Zammad reads them from its `Setting` table at runtime.
+Most "post-install settings" for Zammad are now applied automatically by the upstream entrypoint script — see CLAUDE.md §5 for the up-to-date command list. This page documents the **remaining manual steps** for first-deploy and per-version-bump runs.
 
 ## Order of operations (first deploy)
 
-1. Provision Azure resources via Terraform (`infra/`).
-2. Push the pinned `zammad/zammad:7.0.x` image to `crprdzammad.azurecr.io`.
-3. Run the migrations job — populates the schema and the default `Setting` rows.
-   ```bash
-   az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad
-   ```
-4. Start the long-running apps (`web`, `websocket`, `worker`, `scheduler`, `opensearch`, `memcached`). The deploy pipeline does this automatically; manual is `az containerapp update --image ... ` per app.
-5. Apply the post-install Settings (below). Without these Zammad will not find the search backend, will write attachments into the DB, and will emit wrong URLs in mail.
+1. Provision Azure resources via Terraform in [`evinyacp/az-0265-infra`](https://github.com/evinyacp/az-0265-infra) (not this repo — see CLAUDE.md §14 for the hybrid-repo model).
+2. Build + push the Zammad image from this repo's `Dockerfile` (which pins `ghcr.io/zammad/zammad:7.0.1-0045`) to `crprdzammad.azurecr.io/zammad:<sha>`. The `deploy.yml` workflow does this on push to `main`.
+3. Run the migrations job — populates the schema and the default `Setting` rows. The workflow does this via:
 
-## Settings to apply
+   ```bash
+   az containerapp job update -n cajob-prd-zammad-init -g rg-prd-zammad \
+     --image crprdzammad.azurecr.io/zammad:<sha>
+   az containerapp job start  -n cajob-prd-zammad-init -g rg-prd-zammad
+   ```
+
+   Important: `az containerapp job start --image` silently replaces the entire container template (args/env/secrets/cpu/memory). Always `job update --image` first, then `job start` without `--image`. See [DA-107](https://linear.app/plugport/issue/DA-107) for the upstream Azure CLI bug.
+
+4. Roll the four long-running apps to the new image (web, websocket, worker, scheduler). The deploy workflow does this — `ca-prd-zammad-web` is multi-container (Rails + nginx sidecar) and uses an atomic `--yaml` update so both containers flip in one revision. `opensearch` and `memcached` run upstream images and are not part of the per-deploy roll.
+
+5. Apply the remaining manual Settings below. The previously-documented `Setting.set('es_url', ...)` is no longer needed — the entrypoint sets it automatically from `ELASTICSEARCH_HOST`/`ELASTICSEARCH_PORT` env vars (set on every Zammad-image container by `apps.tf`).
+
+## Manual Settings
+
+Run these in any order via the Rails console inside the web container. They are idempotent.
 
 ```bash
-# Point Zammad at our OpenSearch container
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('es_url', 'http://ca-prd-zammad-opensearch:9200')"
-
 # Tell Zammad to store attachments on the mounted Azure Files share
 az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('storage_provider', 'File')"
 
 # Public hostname (used in outbound mail, SSO callback URLs, etc.)
+# Update this to operations.plugport.no once DA-92 lands the custom domain.
 az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('fqdn', 'operations.plugport.no')"
 
 # Force HTTPS scheme in generated URLs
 az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('http_type', 'https')"
-
-# Build the initial search index — required after enabling Elasticsearch
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rake zammad:searchindex:rebuild
 ```
+
+The initial search index is built by `cajob-prd-zammad-init` itself (the entrypoint's `zammad-init` dispatch handles `db:seed` + ES setup). Only run a manual rebuild after a Zammad version bump whose release notes flag a mapping change — see the version-bump runbook below.
 
 ## SSO setup (admin UI)
 
 Once the app is up and the Settings above are in place:
 
-1. Sign in to `https://operations.plugport.no` as the initial admin user (Zammad creates one on first boot; check the deploy logs for the password, then change it).
+1. Sign in to `https://operations.plugport.no` (or the env default domain until DA-92 lands) as the initial admin user. Zammad creates one on first boot; check the deploy logs for the password, then change it.
 2. Go to **Settings → Security → Third Party Applications → Microsoft (Office 365)**.
 3. Paste App ID, Tenant ID, and Client Secret. Retrieve the secret from Key Vault:
+
    ```bash
    az keyvault secret show \
      --vault-name kv-prd-zammad-ne \
@@ -64,13 +69,18 @@ For every `7.x.y → 7.x.z` deploy:
 # 1. Spin up ephemeral staging from a PITR snapshot, smoke-test there first.
 #    (See docs/features/staging.md)
 
-# 2. Once green in staging, run the prod migration job FIRST
-az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad \
+# 2. Once green in staging, run the prod migration job. The deploy.yml
+#    workflow does this automatically on push-to-main, but for a manual
+#    out-of-band bump:
+az containerapp job update -n cajob-prd-zammad-init -g rg-prd-zammad \
   --image crprdzammad.azurecr.io/zammad:<new-sha>
+az containerapp job start  -n cajob-prd-zammad-init -g rg-prd-zammad
 
-# 3. Then roll the long-running apps via the normal CI/CD pipeline
+# 3. Roll the long-running apps via the normal deploy pipeline
+#    (push to main, or `gh workflow run deploy.yml --ref main`).
 
-# 4. Re-apply the searchindex rebuild only if release notes flag a mapping change
+# 4. Re-apply the searchindex rebuild only if release notes flag a mapping
+#    change. Manual until DA-106 lands the dedicated reindex job:
 az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rake zammad:searchindex:rebuild
 ```
