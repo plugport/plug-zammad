@@ -8,7 +8,7 @@ Every Container Apps deploy that introduces a fresh Zammad install or a version 
 2. Push the pinned `zammad/zammad:7.0.x` image to `crplugport.azurecr.io`.
 3. Run the migrations job — populates the schema and the default `Setting` rows.
    ```bash
-   az containerapp job start -n cajob-plug-zammad-init -g rg-plug-zammad
+   az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad
    ```
 4. Start the long-running apps (`web`, `websocket`, `worker`, `scheduler`, `opensearch`, `memcached`). The deploy pipeline does this automatically; manual is `az containerapp update --image ... ` per app.
 5. Apply the post-install Settings (below). Without these Zammad will not find the search backend, will write attachments into the DB, and will emit wrong URLs in mail.
@@ -17,23 +17,23 @@ Every Container Apps deploy that introduces a fresh Zammad install or a version 
 
 ```bash
 # Point Zammad at our OpenSearch container
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
-  -- rails r "Setting.set('es_url', 'http://ca-plug-zammad-opensearch:9200')"
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
+  -- rails r "Setting.set('es_url', 'http://ca-prd-zammad-opensearch:9200')"
 
 # Tell Zammad to store attachments on the mounted Azure Files share
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('storage_provider', 'File')"
 
 # Public hostname (used in outbound mail, SSO callback URLs, etc.)
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('fqdn', 'operations.plugport.no')"
 
 # Force HTTPS scheme in generated URLs
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('http_type', 'https')"
 
 # Build the initial search index — required after enabling Elasticsearch
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rake zammad:searchindex:rebuild
 ```
 
@@ -46,7 +46,7 @@ Once the app is up and the Settings above are in place:
 3. Paste App ID, Tenant ID, and Client Secret. Retrieve the secret from Key Vault:
    ```bash
    az keyvault secret show \
-     --vault-name kv-plug-zammad \
+     --vault-name kv-prd-zammad \
      --name entra-zammad-client-secret \
      --query value -o tsv
    ```
@@ -65,13 +65,13 @@ For every `7.x.y → 7.x.z` deploy:
 #    (See docs/features/staging.md)
 
 # 2. Once green in staging, run the prod migration job FIRST
-az containerapp job start -n cajob-plug-zammad-init -g rg-plug-zammad \
+az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad \
   --image crplugport.azurecr.io/zammad:<new-sha>
 
 # 3. Then roll the long-running apps via the normal CI/CD pipeline
 
 # 4. Re-apply the searchindex rebuild only if release notes flag a mapping change
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rake zammad:searchindex:rebuild
 ```
 
