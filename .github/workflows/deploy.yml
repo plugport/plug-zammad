@@ -104,7 +104,24 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          for APP in ca-prd-zammad-web ca-prd-zammad-websocket \
+
+          # `ca-prd-zammad-web` has two containers: the Rails app (`web`) and
+          # an nginx sidecar (`nginx`) — both run our Zammad image with
+          # different `args`. `az containerapp update --image` only patches
+          # the first container, and using `--container-name` twice creates
+          # two revisions per deploy. Cleaner: dump the current spec, patch
+          # both container images with yq, and re-apply atomically.
+          echo "::group::Update ca-prd-zammad-web (web + nginx sidecar)"
+          TMP=$(mktemp --suffix=.yaml)
+          az containerapp show -n ca-prd-zammad-web -g "$RG" -o yaml > "$TMP"
+          YQ_EXPR='(.properties.template.containers[] | '
+          YQ_EXPR+='select(.name == "web" or .name == "nginx") | .image) '
+          YQ_EXPR+='= strenv(NEW_IMAGE)'
+          NEW_IMAGE="$IMAGE:$SHA" yq -i "$YQ_EXPR" "$TMP"
+          az containerapp update -n ca-prd-zammad-web -g "$RG" --yaml "$TMP"
+          echo "::endgroup::"
+
+          for APP in ca-prd-zammad-websocket \
                      ca-prd-zammad-worker ca-prd-zammad-scheduler; do
             echo "::group::Update $APP"
             az containerapp update \
