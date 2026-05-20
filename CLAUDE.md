@@ -72,10 +72,11 @@ DA-84 ACP order               ✅ Done
 DA-86 Terraform network       ✅ Done
 DA-87 Identity supplement     ✅ Done (MI, federated cred, AcrPush all in place)
 DA-88 Terraform data          ✅ Done
-DA-89 Terraform apps          ✅ Done
-DA-90 Dockerfile + CI         🔵 In Progress
+DA-89 Terraform apps          ✅ Done (resources scaffolded — but containers are still aci-helloworld placeholders, see DA-96)
+DA-90 Dockerfile + CI         🟣 In Review (PR #9 merged: Dockerfile + ci.yml + deploy.yml; DoD#2 blocked by DA-96)
+DA-96 apps.tf container state 🟡 In Refinement (command/env/secrets/volumes — blocks DA-90 DoD#2, DA-92, DA-93)
 DA-91 Azure OpenAI            🟡 In Refinement (blocked by DA-90)
-DA-92 Custom domain + TLS     🟡 In Refinement (blocked by DA-90)
+DA-92 Custom domain + TLS     🟡 In Refinement (blocked by DA-96 → DA-90)
 DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
 DA-85 SMTP decision           🟡 In Refinement
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
@@ -83,26 +84,17 @@ DA-95 Eviny escalations       🔵 In Progress (samleboks)
 
 ### What's next
 
-ACR is in place, federated credentials are in place, all infra is live. The remaining DA-90 work is **app-repo only**:
+DA-90 app-repo files merged in PR #9 (`Dockerfile` pins `ghcr.io/zammad/zammad:7.0.1-0045`; `ci.yml`, `deploy.yml`, `.yamllint`, `.github/commitlint.config.cjs`, `.dockerignore`). CI is green. First deploy on `main` revealed that the Container Apps are bare `aci-helloworld` placeholders (`command: null, env: null, secrets: []`) — the Zammad image was started with no command and the init job hung on the default-CMD `zammad-railsserver` until the 20-min poll timed out.
 
-1. Pick a concrete Zammad image tag from Docker Hub (`zammad/zammad`). Current stable as of the start of this work was the 7.0.x line — verify the latest patch tag exists before pinning.
-2. Write `Dockerfile` at repo root. Likely just `FROM zammad/zammad:<patch>` with any Plug-specific overlays. The same image runs every role (web / websocket / worker / scheduler / init) — the command differs per Container App, set via Terraform in `evinyacp/az-0265-infra/infrastructure/apps.tf`. For the placeholder switch-over you may need to add per-app `command` and `args` blocks there too.
-3. Write `.dockerignore`.
-4. Write `.github/workflows/ci.yml`:
-   - Trigger: `push` to feature branches, `pull_request` to main.
-   - Steps: `yamllint`, `gitleaks`, Conventional Commits lint, `docker build`, image health-check (`docker run --rm <img> rails runner 'puts "ok"'`).
-5. Write `.github/workflows/deploy.yml`:
-   - Trigger: `push` to main + `workflow_dispatch`.
-   - Auth: `azure/login@v3` with OIDC; principal `az-0265-sp` (app ID `a7141a4c-8174-491f-960b-a9b4eedac81a`, tenant `12f1bdca-9eec-45f6-a63e-2061b957e8ee`, sub `7ffb20c8-2855-49e4-99f0-23ea9bcb706e`).
-   - Steps: `az acr login -n crprdzammad`, `docker build --tag crprdzammad.azurecr.io/zammad:${{ github.sha }} .`, `docker push`, `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image …` and wait, then `az containerapp update` per long-running app (`web`, `websocket`, `worker`, `scheduler`). `memcached` and `opensearch` stay on upstream images (not from our ACR).
-   - Verify: `curl -I https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/` returns 200.
-6. After DA-90: DA-92 (custom domain) → DA-93 (SSO).
+That makes the next step **DA-96** in `evinyacp/az-0265-infra/infrastructure/apps.tf`: per-app `command` + `args` (e.g. `zammad-init`, `zammad-railsserver`, `zammad-scheduler`, `zammad-websocket`, `zammad-nginx` sidecar), the env-var → KV secret-ref wiring from §6, the `/opt/zammad/storage` Azure Files mount, and `mi-prd-zammad-apps` bound as the AcrPull + KV-secrets identity on each app.
+
+Once DA-96 lands, re-run `deploy.yml` via `workflow_dispatch` against `main`. Expected: init job reaches `Succeeded`, the four long-running apps roll to `crprdzammad.azurecr.io/zammad:<sha>`, and `curl -I https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/` returns 200/302. That closes DA-90 DoD#2 and unblocks DA-92 (custom domain) → DA-93 (SSO).
 
 ---
 
 ## 1. Architecture
 
-Zammad is a Rails application split into several long-running processes, a search engine, a cache, and a one-off init job. On Azure Container Apps each process runs as its own Container App in resource group `rg-prd-zammad` (subscription `az-0265-online-plugas-prd-prd-ammad` — name set by Eviny ACP; the typo `ammad` is locked, use the subscription **ID** as source of truth in scripts). Image pin: `zammad/zammad:7.0.x` (latest stable 7.x). Architecture mirrors the upstream `zammad-docker-compose` services.
+Zammad is a Rails application split into several long-running processes, a search engine, a cache, and a one-off init job. On Azure Container Apps each process runs as its own Container App in resource group `rg-prd-zammad` (subscription `az-0265-online-plugas-prd-prd-ammad` — name set by Eviny ACP; the typo `ammad` is locked, use the subscription **ID** as source of truth in scripts). Image pin: `ghcr.io/zammad/zammad:7.0.1-0045` (upstream-canonical via `IMAGE_REPO` default in `zammad/zammad-docker-compose/.env.dist`; Docker Hub `zammad/zammad` mirrors the same content). Architecture mirrors the upstream `zammad-docker-compose` services.
 
 | Container App | Role | Replicas |
 |---|---|---|
@@ -295,7 +287,7 @@ GitHub Actions workflows in this repo live in `.github/workflows/`. Authenticate
 ### Stages
 
 1. **Validate** — `yamllint`, `terraform fmt -check`, `helm lint` (if any), `gitleaks`, Conventional Commits lint.
-2. **Build** — container image built from `zammad/zammad:7.0.x` (pinned to a specific patch) + Plug overlays, tagged with `${{ github.sha }}` and pushed to `crprdzammad.azurecr.io/zammad:<sha>`.
+2. **Build** — container image built from `ghcr.io/zammad/zammad:7.0.1-0045` (pinned in `Dockerfile` via `ARG ZAMMAD_VERSION`), tagged with `${{ github.sha }}` and pushed to `crprdzammad.azurecr.io/zammad:<sha>`.
 3. **Test** — health-check the built image (`docker run --rm <img> rails runner 'puts "ok"'`), run config-validation scripts.
 4. **Deploy** — strict order:
    1. `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>` and wait for it to succeed (runs `rake db:migrate`). Long-running apps must **not** start on the new image until migrations finish.
