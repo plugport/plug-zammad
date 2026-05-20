@@ -23,12 +23,12 @@ For day-to-day config / overlay / env-var changes the schema is stable, so revis
 
 ```bash
 # Build and push the new image
-docker build -t crplugport.azurecr.io/zammad:<sha> .
-docker push crplugport.azurecr.io/zammad:<sha>
+docker build -t crprdzammad.azurecr.io/zammad:<sha> .
+docker push crprdzammad.azurecr.io/zammad:<sha>
 
 # Roll a new revision at 0% traffic
 az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad \
-  --image crplugport.azurecr.io/zammad:<sha> \
+  --image crprdzammad.azurecr.io/zammad:<sha> \
   --revision-suffix <sha>
 
 # Smoke-test the new revision via its preview FQDN
@@ -58,7 +58,7 @@ Terraform `module.staging` lives at `infra/modules/staging` (to be authored). It
 cd infra
 terraform init
 terraform apply -target=module.staging \
-  -var="zammad_image=crplugport.azurecr.io/zammad:<sha>" \
+  -var="zammad_image=crprdzammad.azurecr.io/zammad:<sha>" \
   -var="pitr_restore_point=$(date -u +%FT%TZ)"
 
 # 2. Run migrations on staging

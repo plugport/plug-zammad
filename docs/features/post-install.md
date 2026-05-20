@@ -5,7 +5,7 @@ Every Container Apps deploy that introduces a fresh Zammad install or a version 
 ## Order of operations (first deploy)
 
 1. Provision Azure resources via Terraform (`infra/`).
-2. Push the pinned `zammad/zammad:7.0.x` image to `crplugport.azurecr.io`.
+2. Push the pinned `zammad/zammad:7.0.x` image to `crprdzammad.azurecr.io`.
 3. Run the migrations job — populates the schema and the default `Setting` rows.
    ```bash
    az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad
@@ -66,7 +66,7 @@ For every `7.x.y → 7.x.z` deploy:
 
 # 2. Once green in staging, run the prod migration job FIRST
 az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad \
-  --image crplugport.azurecr.io/zammad:<new-sha>
+  --image crprdzammad.azurecr.io/zammad:<new-sha>
 
 # 3. Then roll the long-running apps via the normal CI/CD pipeline
 
