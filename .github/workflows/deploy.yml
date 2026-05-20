@@ -1,0 +1,120 @@
+---
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write  # required for OIDC federation to Entra ID
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false  # never cancel a deploy mid-flight
+
+env:
+  AZURE_CLIENT_ID: a7141a4c-8174-491f-960b-a9b4eedac81a
+  AZURE_TENANT_ID: 12f1bdca-9eec-45f6-a63e-2061b957e8ee
+  AZURE_SUBSCRIPTION_ID: 7ffb20c8-2855-49e4-99f0-23ea9bcb706e
+  RG: rg-prd-zammad
+  ACR: crprdzammad
+  IMAGE: crprdzammad.azurecr.io/zammad
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: ACR login
+        run: az acr login -n "$ACR"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run init job (db:migrate) and wait
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          EXEC_NAME=$(az containerapp job start \
+            -n cajob-prd-zammad-init -g "$RG" \
+            --image "$IMAGE:$SHA" \
+            --query name -o tsv)
+          echo "Started init execution: $EXEC_NAME"
+          # Poll up to 20 min
+          for i in $(seq 1 80); do
+            STATUS=$(az containerapp job execution show \
+              -n cajob-prd-zammad-init -g "$RG" \
+              --job-execution-name "$EXEC_NAME" \
+              --query properties.status -o tsv)
+            echo "[$i/80] status=$STATUS"
+            case "$STATUS" in
+              Succeeded) echo "init job succeeded"; exit 0 ;;
+              Failed|Cancelled|Degraded)
+                echo "init job ended in $STATUS"
+                az containerapp job execution show \
+                  -n cajob-prd-zammad-init -g "$RG" \
+                  --job-execution-name "$EXEC_NAME" -o json
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "init job timed out after 20 min"
+          exit 1
+
+      - name: Roll long-running apps
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          for APP in ca-prd-zammad-web ca-prd-zammad-websocket \
+                     ca-prd-zammad-worker ca-prd-zammad-scheduler; do
+            echo "::group::Update $APP"
+            az containerapp update \
+              -n "$APP" -g "$RG" \
+              --image "$IMAGE:$SHA"
+            echo "::endgroup::"
+          done
+
+      - name: Verify web endpoint
+        run: |
+          set -euo pipefail
+          FQDN=$(az containerapp show -n ca-prd-zammad-web -g "$RG" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Checking https://$FQDN/"
+          # Allow a brief warm-up
+          for i in $(seq 1 12); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/" || echo "000")
+            echo "[$i/12] HTTP $CODE"
+            if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "web endpoint never returned 200/302"
+          exit 1
