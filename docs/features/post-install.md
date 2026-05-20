@@ -46,7 +46,7 @@ Once the app is up and the Settings above are in place:
 3. Paste App ID, Tenant ID, and Client Secret. Retrieve the secret from Key Vault:
    ```bash
    az keyvault secret show \
-     --vault-name kv-prd-zammad \
+     --vault-name kv-prd-zammad-ne \
      --name entra-zammad-client-secret \
      --query value -o tsv
    ```

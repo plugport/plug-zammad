@@ -16,8 +16,8 @@ We accept the trade-offs:
 
 | Resource | Purpose |
 |---|---|
-| `stprdzammad` | Storage Account (GRS) |
-| `stprdzammad/zammad-storage` | File share — mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` |
+| `stprdzammadne` | Storage Account (GRS) |
+| `stprdzammadne/zammad-storage` | File share — mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` |
 
 The mount is declared on the Container Apps environment as a named storage definition, then referenced from each app's `template.volumes`.
 
@@ -60,7 +60,7 @@ Run this on a quiet window — it streams every attachment row, so it can take m
 The Storage Account is GRS, replicating to the paired region. We also enable a **daily file-share snapshot** with 14-day retention:
 
 ```bash
-az storage share-rm snapshot -n zammad-storage --storage-account stprdzammad
+az storage share-rm snapshot -n zammad-storage --storage-account stprdzammadne
 ```
 
 Schedule via Azure Backup → backup policy `bp-prd-zammad-fileshare`. RPO target: 24h. Combined with Postgres 7-day PITR, total RTO for a full restore is well under 4h.
