@@ -41,8 +41,8 @@ A truthful snapshot of where the deployment actually stands today, so a new sess
 | `cae-prd-zammad` (Container Apps env) | ✅ Live; default domain `orangemoss-71bfd191.norwayeast.azurecontainerapps.io` |
 | 6 Container Apps + `cajob-prd-zammad-init` | ✅ Live, all on placeholder helloworld image |
 | 5 Private DNS zones + VNet-links | ✅ Live |
-| `crprdzammad` ACR (own workload sub) | ⏳ Pending — DA-90 |
-| Federated credential for `plugport/plug-zammad` on `az-0265-sp` | ⏳ Pending — DA-87 |
+| `crprdzammad` ACR (Standard tier, `crprdzammad.azurecr.io`) | ✅ Live; `az-0265-sp` has AcrPush, `mi-prd-zammad-apps` has AcrPull |
+| Federated credentials on `az-0265-sp` | ✅ Live for `evinyacp/az-0265-infra` (ACP-original) and `plugport/plug-zammad` (added 2026-05-20: subjects `:ref:refs/heads/main` and `:pull_request`) |
 
 ### Bootstrap-prompt corrections (for future reference)
 
@@ -70,7 +70,7 @@ The original bootstrap prompt in `docs/claude-md-bootstrap.md` named several thi
 ```
 DA-84 ACP order               ✅ Done
 DA-86 Terraform network       ✅ Done
-DA-87 Identity supplement     🟡 In Refinement (MI done via DA-88; federated cred + ACR roles pending)
+DA-87 Identity supplement     ✅ Done (MI, federated cred, AcrPush all in place)
 DA-88 Terraform data          ✅ Done
 DA-89 Terraform apps          ✅ Done
 DA-90 Dockerfile + CI         🔵 In Progress
@@ -83,11 +83,20 @@ DA-95 Eviny escalations       🔵 In Progress (samleboks)
 
 ### What's next
 
-1. Add `crprdzammad` ACR in the workload sub via Terraform (`evinyacp/az-0265-infra`).
-2. Add federated credentials on `az-0265-sp` for `plugport/plug-zammad` ref/main and pull_request.
-3. Write `Dockerfile`, `ci.yml`, `deploy.yml` here. Image: `zammad/zammad:6.5` or current 7.x stable on Docker Hub.
-4. First end-to-end deploy: image push to ACR → `cajob-prd-zammad-init` runs migrations → six apps roll over → `curl -I https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/` returns 200 on the real Zammad.
-5. Then DA-92 (custom domain) and DA-93 (SSO) in sequence.
+ACR is in place, federated credentials are in place, all infra is live. The remaining DA-90 work is **app-repo only**:
+
+1. Pick a concrete Zammad image tag from Docker Hub (`zammad/zammad`). Current stable as of the start of this work was the 7.0.x line — verify the latest patch tag exists before pinning.
+2. Write `Dockerfile` at repo root. Likely just `FROM zammad/zammad:<patch>` with any Plug-specific overlays. The same image runs every role (web / websocket / worker / scheduler / init) — the command differs per Container App, set via Terraform in `evinyacp/az-0265-infra/infrastructure/apps.tf`. For the placeholder switch-over you may need to add per-app `command` and `args` blocks there too.
+3. Write `.dockerignore`.
+4. Write `.github/workflows/ci.yml`:
+   - Trigger: `push` to feature branches, `pull_request` to main.
+   - Steps: `yamllint`, `gitleaks`, Conventional Commits lint, `docker build`, image health-check (`docker run --rm <img> rails runner 'puts "ok"'`).
+5. Write `.github/workflows/deploy.yml`:
+   - Trigger: `push` to main + `workflow_dispatch`.
+   - Auth: `azure/login@v3` with OIDC; principal `az-0265-sp` (app ID `a7141a4c-8174-491f-960b-a9b4eedac81a`, tenant `12f1bdca-9eec-45f6-a63e-2061b957e8ee`, sub `7ffb20c8-2855-49e4-99f0-23ea9bcb706e`).
+   - Steps: `az acr login -n crprdzammad`, `docker build --tag crprdzammad.azurecr.io/zammad:${{ github.sha }} .`, `docker push`, `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image …` and wait, then `az containerapp update` per long-running app (`web`, `websocket`, `worker`, `scheduler`). `memcached` and `opensearch` stay on upstream images (not from our ACR).
+   - Verify: `curl -I https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/` returns 200.
+6. After DA-90: DA-92 (custom domain) → DA-93 (SSO).
 
 ---
 
