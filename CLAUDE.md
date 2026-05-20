@@ -6,27 +6,27 @@ Zammad on Azure Container Apps, exposed at `https://operations.plugport.no`. Int
 
 ## 1. Architecture
 
-Zammad is a Rails application split into several long-running processes, a search engine, a cache, and a one-off init job. On Azure Container Apps each process runs as its own Container App in resource group `rg-plug-zammad` (subscription `sub-plug-zammad`). Image pin: `zammad/zammad:7.0.x` (latest stable 7.x). Architecture mirrors the upstream `zammad-docker-compose` services.
+Zammad is a Rails application split into several long-running processes, a search engine, a cache, and a one-off init job. On Azure Container Apps each process runs as its own Container App in resource group `rg-prd-zammad` (subscription `az-0265-online-plugas-prd-prd-ammad` — name set by Eviny ACP; the typo `ammad` is locked, use the subscription **ID** as source of truth in scripts). Image pin: `zammad/zammad:7.0.x` (latest stable 7.x). Architecture mirrors the upstream `zammad-docker-compose` services.
 
 | Container App | Role | Replicas |
 |---|---|---|
-| `ca-plug-zammad-web` | Rails (Puma) + **nginx sidecar** (asset caching, attachment streaming, websocket upgrade routing) | 1–3 (HTTP-scaled) |
-| `ca-plug-zammad-websocket` | WebSocket server for live agent UI | 1–2 |
-| `ca-plug-zammad-worker` | Sidekiq background workers (mail, search indexing, webhooks) | 1–4 (queue-scaled) |
-| `ca-plug-zammad-scheduler` | Recurring jobs (escalation timers, report generation) | 1 (singleton) |
-| `ca-plug-zammad-opensearch` | OpenSearch single-node, internal-only ingress | 1 |
-| `ca-plug-zammad-memcached` | Memcached — required by Zammad for containerised cache sharing (`MEMCACHE_SERVERS`) | 1 |
-| `cajob-plug-zammad-init` | **Container Apps Job** — runs `rake db:migrate` on each version bump. Not long-running. | — |
+| `ca-prd-zammad-web` | Rails (Puma) + **nginx sidecar** (asset caching, attachment streaming, websocket upgrade routing) | 1–3 (HTTP-scaled) |
+| `ca-prd-zammad-websocket` | WebSocket server for live agent UI | 1–2 |
+| `ca-prd-zammad-worker` | Sidekiq background workers (mail, search indexing, webhooks) | 1–4 (queue-scaled) |
+| `ca-prd-zammad-scheduler` | Recurring jobs (escalation timers, report generation) | 1 (singleton) |
+| `ca-prd-zammad-opensearch` | OpenSearch single-node, internal-only ingress | 1 |
+| `ca-prd-zammad-memcached` | Memcached — required by Zammad for containerised cache sharing (`MEMCACHE_SERVERS`) | 1 |
+| `cajob-prd-zammad-init` | **Container Apps Job** — runs `rake db:migrate` on each version bump. Not long-running. | — |
 
 Data plane:
 
 | Resource | Service | Notes |
 |---|---|---|
-| `pg-plug-zammad` | Azure DB for PostgreSQL Flexible Server | App DB. 7-day PITR. Private endpoint. |
-| `cache-plug-zammad` | Azure Cache for Redis (Basic C0/C1) | Sidekiq queue + Rails cache. TLS only. |
-| `st-plug-zammad` | Storage Account → Azure Files (SMB share `zammad-storage`) | Attachments. Mounted into `ca-plug-zammad-{web,worker}` at `/opt/zammad/storage` via Container Apps `AzureFile` volume. GRS. Blob is **not** natively mountable on Container Apps — Files is the supported path. |
-| `kv-plug-zammad` | Azure Key Vault | All long-lived secrets (DB password, Redis key, Entra client secret, SMTP creds). Referenced from Container Apps as secret refs. |
-| `crplugport` | Azure Container Registry | Lives in a different subscription. `sp-plug-zammad` has `AcrPull` cross-sub. |
+| `pg-prd-zammad` | Azure DB for PostgreSQL Flexible Server | App DB. 7-day PITR. Private endpoint. |
+| `cache-prd-zammad` | Azure Cache for Redis (Basic C0/C1) | Sidekiq queue + Rails cache. TLS only. |
+| `stprdzammad` | Storage Account → Azure Files (SMB share `zammad-storage`) | Attachments. Mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` via Container Apps `AzureFile` volume. GRS. Blob is **not** natively mountable on Container Apps — Files is the supported path. |
+| `kv-prd-zammad` | Azure Key Vault | All long-lived secrets (DB password, Redis key, Entra client secret, SMTP creds). Referenced from Container Apps as secret refs. |
+| `crplugport` | Azure Container Registry | Lives in a different subscription. `az-0265-sp` has `AcrPull` cross-sub. |
 
 Traffic flow:
 
@@ -39,28 +39,24 @@ Traffic flow:
                           │  (HSTS, CSP, X-Frame-Options)│  (Path A — Let's Encrypt)
                           └─────────────┬────────────────┘
                                         │
-   ╔════════════════════════════════════╪═══════════════════════════════════════╗
-   ║ vnet-plug-zammad (workload-profile environment)                            ║
-   ║                                    │                                       ║
-   ║  ┌─────────────────────────┬───────┴────────┬──────────────────────────┐   ║
-   ║  ▼                         ▼                ▼                          ▼   ║
-   ║ ca-plug-zammad-web   ca-plug-zammad-       ca-plug-zammad-       ca-plug-  ║
-   ║ (Rails + nginx       websocket             opensearch            zammad-   ║
-   ║  sidecar)                                  (internal)            memcached ║
-   ║   │  │  │  │              │                ▲                          ▲   ║
-   ║   │  │  │  └─ AzureFile ──┼─► st-plug-zammad (zammad-storage share)   │   ║
-   ║   │  │  └─ memcached ─────┼──────────────────────────────────────────►┤   ║
-   ║   │  └─ redis ────────────┼─► cache-plug-zammad                       │   ║
-   ║   └─ psql ─► [Private EP] ────► pg-plug-zammad (Flexible Server)      │   ║
-   ║                            │                                          │   ║
-   ║                            ▼                                          │   ║
-   ║                 ca-plug-zammad-worker  +  ca-plug-zammad-scheduler ───┘   ║
-   ║                            │                                              ║
-   ║                  ┌─────────┴──────────┐                                   ║
-   ║                  │ cajob-plug-zammad- │  (one-off; runs before each       ║
-   ║                  │ init               │   long-running app update)        ║
-   ║                  └────────────────────┘                                   ║
-   ╚════════════════════════════════════════════════════════════════════════════╝
+   ╔══════════════════════════════════════╪═══════════════════════════════════════╗
+   ║ vnet-prd-zammad (workload-profile Container Apps environment)               ║
+   ║                                      │                                      ║
+   ║   ┌──────────────┬──────────────┬────┴─────────┬──────────────┐             ║
+   ║   ▼              ▼              ▼              ▼              ▼             ║
+   ║  ca-prd-     ca-prd-zammad- ca-prd-zammad- ca-prd-zammad- ca-prd-zammad-    ║
+   ║  zammad-web  websocket      opensearch     memcached      worker/scheduler  ║
+   ║  (+nginx)                   (internal)                                      ║
+   ║   │  │  │  │      │              ▲              ▲              │            ║
+   ║   │  │  │  └── AzureFile mount ──┼──► stprdzammad (zammad-storage share)    ║
+   ║   │  │  └── memcached ───────────┼──────────────┘              │            ║
+   ║   │  └── redis ──────────────────┼──► cache-prd-zammad                      ║
+   ║   └── psql ──► [Private EP] ─────┼──► pg-prd-zammad (Flexible Server)       ║
+   ║                                  │                              │            ║
+   ║                                  ▼                              │            ║
+   ║                            cajob-prd-zammad-init (one-off, runs before      ║
+   ║                            long-running app updates / version bumps)        ║
+   ╚══════════════════════════════════════════════════════════════════════════════╝
                                         │
                                         └──► SMTP (TBD — tracked in Linear, see §11)
 ```
@@ -124,37 +120,37 @@ docker compose exec zammad-web rails c     # Rails console
 docker compose down -v                     # tear down + drop volumes
 ```
 
-Azure (against `sub-plug-zammad`):
+Azure (against `az-0265-online-plugas-prd-prd-ammad`):
 
 ```bash
-az account set --subscription sub-plug-zammad
-az containerapp list -g rg-plug-zammad -o table
-az containerapp revision list -n ca-plug-zammad-web -g rg-plug-zammad -o table
-az containerapp update -n ca-plug-zammad-web -g rg-plug-zammad --image crplugport.azurecr.io/zammad:<sha>
-az containerapp revision activate -n ca-plug-zammad-web -g rg-plug-zammad --revision <previous>   # rollback
-az containerapp logs show -n ca-plug-zammad-web -g rg-plug-zammad --follow
+az account set --subscription az-0265-online-plugas-prd-prd-ammad
+az containerapp list -g rg-prd-zammad -o table
+az containerapp revision list -n ca-prd-zammad-web -g rg-prd-zammad -o table
+az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crplugport.azurecr.io/zammad:<sha>
+az containerapp revision activate -n ca-prd-zammad-web -g rg-prd-zammad --revision <previous>   # rollback
+az containerapp logs show -n ca-prd-zammad-web -g rg-prd-zammad --follow
 
 # Run the migrations job before bumping long-running apps
-az containerapp job start -n cajob-plug-zammad-init -g rg-plug-zammad
+az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad
 ```
 
 Post-install / post-version-bump (Rails console via `exec`). See `docs/features/post-install.md` for the full runbook:
 
 ```bash
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
-  -- rails r "Setting.set('es_url', 'http://ca-plug-zammad-opensearch:9200')"
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
+  -- rails r "Setting.set('es_url', 'http://ca-prd-zammad-opensearch:9200')"
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('storage_provider', 'File')"
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('fqdn', 'operations.plugport.no')"
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('http_type', 'https')"
 ```
 
 Postgres:
 
 ```bash
-az postgres flexible-server connect -n pg-plug-zammad -u zammad -d zammad_production
+az postgres flexible-server connect -n pg-prd-zammad -u zammad -d zammad_production
 ```
 
 PR shortcuts:
@@ -167,29 +163,31 @@ gh pr merge --squash --delete-branch
 
 ## 6. Azure resources
 
-All resources live in resource group `rg-plug-zammad` inside subscription `sub-plug-zammad`, region `West Europe`. ACR `crplugport` is **cross-subscription**; `sp-plug-zammad` is granted `AcrPull` on it.
+All resources live in resource group `rg-prd-zammad` inside subscription `az-0265-online-plugas-prd-prd-ammad` (Eviny ACP-managed; display-name typo locked — use subscription ID in CI/CD), region `West Europe`. AAD owners group: `az-0265-owners`. Service principal: `az-0265-sp` (pre-wired with OIDC by ACP). ACR `crplugport` is **cross-subscription**; `az-0265-sp` is granted `AcrPull` on it.
 
 | Resource | Role | FQDN / identifier | Produces (env var → secret ref) |
 |---|---|---|---|
-| `ca-plug-zammad-web` | Rails web | `ca-plug-zammad-web.<env>.azurecontainerapps.io` (also `operations.plugport.no` via custom domain) | — |
-| `ca-plug-zammad-websocket` | WebSocket server | internal | — |
-| `ca-plug-zammad-worker` | Sidekiq workers | internal | — |
-| `ca-plug-zammad-scheduler` | Cron / scheduler | internal | — |
-| `ca-plug-zammad-opensearch` | Search backend | `ca-plug-zammad-opensearch:9200` (internal) | URL configured at runtime via `Setting.set('es_url', ...)` — **not** an env var |
-| `ca-plug-zammad-memcached` | Memcached | `ca-plug-zammad-memcached:11211` (internal) | `MEMCACHE_SERVERS=ca-plug-zammad-memcached:11211` |
-| `cajob-plug-zammad-init` | Container Apps Job — migrations | — | invoked as `az containerapp job start` before each version bump |
-| `vnet-plug-zammad` | VNet for Container Apps env + private endpoints | subnets: `snet-apps` (delegated to Container Apps), `snet-data` (Postgres PE) | Private DNS zone `privatelink.postgres.database.azure.com` linked |
-| `pg-plug-zammad` | App database | `pg-plug-zammad.postgres.database.azure.com` (resolved via Private DNS to `snet-data`) | `POSTGRES_HOST`, `POSTGRES_PASS` ← `kv-plug-zammad/postgres-password` |
-| `cache-plug-zammad` | Redis | `cache-plug-zammad.redis.cache.windows.net:6380` | `REDIS_URL` ← `kv-plug-zammad/redis-url` |
-| `st-plug-zammad` | Azure Files (`zammad-storage` share) | `st-plug-zammad.file.core.windows.net` | mounted at `/opt/zammad/storage`; storage provider set at runtime via `Setting.set('storage_provider', 'File')` |
-| `kv-plug-zammad` | Secrets store | `kv-plug-zammad.vault.azure.net` | all secret refs |
-| `log-plug-zammad` | Log Analytics workspace | — | Container Apps + Postgres + Redis diagnostic logs |
-| `sp-plug-zammad` | Service principal (CI/CD) | — | federated credentials only, no client secret |
+| `ca-prd-zammad-web` | Rails web | `ca-prd-zammad-web.<env>.azurecontainerapps.io` (also `operations.plugport.no` via custom domain) | — |
+| `ca-prd-zammad-websocket` | WebSocket server | internal | — |
+| `ca-prd-zammad-worker` | Sidekiq workers | internal | — |
+| `ca-prd-zammad-scheduler` | Cron / scheduler | internal | — |
+| `ca-prd-zammad-opensearch` | Search backend | `ca-prd-zammad-opensearch:9200` (internal) | URL configured at runtime via `Setting.set('es_url', ...)` — **not** an env var |
+| `ca-prd-zammad-memcached` | Memcached | `ca-prd-zammad-memcached:11211` (internal) | `MEMCACHE_SERVERS=ca-prd-zammad-memcached:11211` |
+| `cajob-prd-zammad-init` | Container Apps Job — migrations | — | invoked as `az containerapp job start` before each version bump |
+| `vnet-prd-zammad` | VNet for Container Apps env + private endpoints | subnets: `snet-apps` (delegated to Container Apps), `snet-data` (Postgres PE) | Private DNS zone `privatelink.postgres.database.azure.com` linked |
+| `pg-prd-zammad` | App database | `pg-prd-zammad.postgres.database.azure.com` (resolved via Private DNS to `snet-data`) | `POSTGRES_HOST`, `POSTGRES_PASS` ← `kv-prd-zammad/postgres-password` |
+| `cache-prd-zammad` | Redis | `cache-prd-zammad.redis.cache.windows.net:6380` | `REDIS_URL` ← `kv-prd-zammad/redis-url` |
+| `stprdzammad` | Azure Files (`zammad-storage` share) | `stprdzammad.file.core.windows.net` | mounted at `/opt/zammad/storage`; storage provider set at runtime via `Setting.set('storage_provider', 'File')` |
+| `kv-prd-zammad` | Secrets store | `kv-prd-zammad.vault.azure.net` | all secret refs |
+| `log-prd-zammad` | Log Analytics workspace | — | Container Apps + Postgres + Redis diagnostic logs |
+| `az-0265-sp` | Service principal (CI/CD) | — | federated credentials only, no client secret |
 | `crplugport` | ACR (cross-sub) | `crplugport.azurecr.io` | image registry |
 
 ## 7. CI/CD
 
-GitHub Actions workflows live in `.github/workflows/`. Authenticate to Azure via **workload identity federation** with service principal `sp-plug-zammad` — no long-lived secrets in GitHub.
+Hybrid repo model — see §16. App + Dockerfile + deploy workflows live in **this repo** (`plugport/plug-zammad`); Terraform lives in **`evinyacp/az-0265-infra`**. Both repos share `az-0265-sp` via federated OIDC credentials (one per repo).
+
+GitHub Actions workflows in this repo live in `.github/workflows/`. Authenticate to Azure via **workload identity federation** with service principal `az-0265-sp` — no long-lived secrets in GitHub.
 
 ### Triggers
 
@@ -204,15 +202,15 @@ GitHub Actions workflows live in `.github/workflows/`. Authenticate to Azure via
 2. **Build** — container image built from `zammad/zammad:7.0.x` (pinned to a specific patch) + Plug overlays, tagged with `${{ github.sha }}` and pushed to `crplugport.azurecr.io/zammad:<sha>`.
 3. **Test** — health-check the built image (`docker run --rm <img> rails runner 'puts "ok"'`), run config-validation scripts.
 4. **Deploy** — strict order:
-   1. `az containerapp job start -n cajob-plug-zammad-init -g rg-plug-zammad --image crplugport.azurecr.io/zammad:<sha>` and wait for it to succeed (runs `rake db:migrate`). Long-running apps must **not** start on the new image until migrations finish.
-   2. `az containerapp update -n ca-plug-zammad-web -g rg-plug-zammad --image crplugport.azurecr.io/zammad:<sha>`. Wait for new revision to become healthy.
+   1. `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image crplugport.azurecr.io/zammad:<sha>` and wait for it to succeed (runs `rake db:migrate`). Long-running apps must **not** start on the new image until migrations finish.
+   2. `az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crplugport.azurecr.io/zammad:<sha>`. Wait for new revision to become healthy.
    3. Repeat the update for `websocket`, `worker`, `scheduler`, `memcached` (memcached only on infra changes).
 5. **Verify** — hit `https://operations.plugport.no/api/v1/users/me` with a service-account token → expect HTTP 200. Hit `/` → expect HTTP 200 + expected HTML title.
 
 ### Secrets in CI
 
-- Workload identity federation between GitHub Actions and Entra ID. `sp-plug-zammad` is scoped to `rg-plug-zammad` only (Contributor) + `AcrPush` on `crplugport`.
-- Container Apps reads runtime secrets from `kv-plug-zammad` via secret references — never from GitHub Actions.
+- Workload identity federation between GitHub Actions and Entra ID. `az-0265-sp` is scoped to `rg-prd-zammad` only (Contributor) + `AcrPush` on `crplugport`.
+- Container Apps reads runtime secrets from `kv-prd-zammad` via secret references — never from GitHub Actions.
 
 ### Log monitoring policy
 
@@ -225,7 +223,7 @@ After every push to `main`, check the CI/CD workflow logs for warnings and depre
 
 ### Rollback
 
-- Container Apps revisions are immutable: `az containerapp revision activate -n <app> -g rg-plug-zammad --revision <previous>`.
+- Container Apps revisions are immutable: `az containerapp revision activate -n <app> -g rg-prd-zammad --revision <previous>`.
 - For Zammad **version upgrades**, the rollback path is not the revision — it is the Postgres PITR + ephemeral staging dry-run. See `docs/features/staging.md`.
 
 ## 8. SSO (Entra ID)
@@ -288,13 +286,13 @@ See `docs/features/sso-entra.md`.
 `plugport.no` lives in `evinyacp/eviny-dns` (Terraform). To add `operations.plugport.no`:
 
 1. Branch `eviny-dns` from `main`.
-2. Add `operations` CNAME → `ca-plug-zammad-web.<env>.azurecontainerapps.io` and `asuid.operations` TXT (validation token from Azure).
+2. Add `operations` CNAME → `ca-prd-zammad-web.<env>.azurecontainerapps.io` and `asuid.operations` TXT (validation token from Azure).
 3. PR → owner approval from `@evinyacp/az-eacp-owner` → **Squash and merge**. `terraform apply` runs post-merge.
 4. Verify: `dig +short operations.plugport.no`.
 
 ### TLS
 
-1. Azure Portal → `ca-plug-zammad-web` → Custom domains → Add custom domain → `operations.plugport.no`.
+1. Azure Portal → `ca-prd-zammad-web` → Custom domains → Add custom domain → `operations.plugport.no`.
 2. Validation via the `asuid.operations` TXT added above.
 3. Select **Managed certificate** → Azure issues Let's Encrypt cert and rotates automatically.
 4. Bind the domain.
@@ -321,25 +319,25 @@ Zammad sends:
 ### Backups
 
 - **Postgres**: 7-day point-in-time restore on Flexible Server. Geo-redundant backup storage.
-- **Attachments** (`st-plug-zammad` Azure Files share): GRS replication (West Europe → North Europe). File-share-level snapshot daily, retained 14 days.
+- **Attachments** (`stprdzammad` Azure Files share): GRS replication (West Europe → North Europe). File-share-level snapshot daily, retained 14 days.
 - **Target**: RTO 4h / RPO 1h.
 
 ### Monitoring
 
-- Container Apps + Postgres + Redis diagnostic logs → `log-plug-zammad` (Log Analytics workspace).
+- Container Apps + Postgres + Redis diagnostic logs → `log-prd-zammad` (Log Analytics workspace).
 - Alerts (Action Group → Plug oncall):
   - Container App health probe failures > 2 in 5 min
   - Postgres CPU > 80% for 10 min
   - Redis cache evictions > threshold
   - SSO sign-in failure rate spike
-- Dashboards: Azure Workbook `wb-plug-zammad-overview` (latency, error rate, queue depth).
+- Dashboards: Azure Workbook `wb-prd-zammad-overview` (latency, error rate, queue depth).
 
 ## 11. Staging strategy
 
 Hybrid model:
 
 - **Daily ops** — config changes, env-var tweaks, Plug overlays at the *same* Zammad version: use Container Apps revisions for blue/green. New revision takes 0% traffic by default; promote via `--traffic-weight latest=100`.
-- **Zammad version bumps** (any 7.x.y → 7.x.z with `db:migrate`, or 7 → 8): spin up ephemeral staging via Terraform `module.staging` — restores latest Postgres PITR snapshot into `pg-plug-zammad-staging`, brings up `ca-plug-zammad-staging`, runs smoke tests, tears down.
+- **Zammad version bumps** (any 7.x.y → 7.x.z with `db:migrate`, or 7 → 8): spin up ephemeral staging via Terraform `module.staging` — restores latest Postgres PITR snapshot into `pg-stg-zammad`, brings up `ca-stg-zammad`, runs smoke tests, tears down.
 
 Full runbook: `docs/features/staging.md`.
 
@@ -351,13 +349,13 @@ Initial Container App sizing for a ~40-agent install. Re-tune after the first mo
 
 | Container App | CPU | Memory | Replicas | Notes |
 |---|---|---|---|---|
-| `ca-plug-zammad-web` | 2.0 | 4 Gi | 1–3 (HTTP-scaled) | Rails + nginx sidecar |
-| `ca-plug-zammad-websocket` | 1.0 | 2 Gi | 1–2 | |
-| `ca-plug-zammad-worker` | 2.0 | 4 Gi | 1–4 (queue-scaled) | Sidekiq spawns several processes per replica |
-| `ca-plug-zammad-scheduler` | 0.5 | 1 Gi | 1 (singleton) | |
-| `ca-plug-zammad-opensearch` | 2.0 | 4 Gi | 1 | Single-node; persistent storage on attached volume |
-| `ca-plug-zammad-memcached` | 0.25 | 0.5 Gi | 1 | Stateless cache |
-| `cajob-plug-zammad-init` | 1.0 | 2 Gi | job | Migrations only |
+| `ca-prd-zammad-web` | 2.0 | 4 Gi | 1–3 (HTTP-scaled) | Rails + nginx sidecar |
+| `ca-prd-zammad-websocket` | 1.0 | 2 Gi | 1–2 | |
+| `ca-prd-zammad-worker` | 2.0 | 4 Gi | 1–4 (queue-scaled) | Sidekiq spawns several processes per replica |
+| `ca-prd-zammad-scheduler` | 0.5 | 1 Gi | 1 (singleton) | |
+| `ca-prd-zammad-opensearch` | 2.0 | 4 Gi | 1 | Single-node; persistent storage on attached volume |
+| `ca-prd-zammad-memcached` | 0.25 | 0.5 Gi | 1 | Stateless cache |
+| `cajob-prd-zammad-init` | 1.0 | 2 Gi | job | Migrations only |
 
 Total baseline ≈ **7.75 CPU / 15.5 Gi**. Zammad's documented minimum is 2 CPU + 6 GB for the app and an additional 4 GB for Elasticsearch on the same host — this layout splits those budgets across dedicated apps for blast-radius isolation.
 
@@ -365,15 +363,30 @@ Total baseline ≈ **7.75 CPU / 15.5 Gi**. Zammad's documented minimum is 2 CPU 
 
 Container Apps must reach Postgres Flexible Server over a private endpoint, so the environment runs in a custom VNet (workload-profile environment is required for VNet + private endpoint support).
 
-- **VNet**: `vnet-plug-zammad` (`10.40.0.0/16`).
+- **VNet**: `vnet-prd-zammad` (`10.40.0.0/16`).
   - `snet-apps` (`/23`, delegated to `Microsoft.App/environments`) — Container Apps environment subnet.
-  - `snet-data` (`/27`) — Private Endpoints for `pg-plug-zammad`.
+  - `snet-data` (`/27`) — Private Endpoints for `pg-prd-zammad`.
 - **Private DNS zones** linked to the VNet:
-  - `privatelink.postgres.database.azure.com` — resolves `pg-plug-zammad.postgres.database.azure.com` to the PE in `snet-data`.
+  - `privatelink.postgres.database.azure.com` — resolves `pg-prd-zammad.postgres.database.azure.com` to the PE in `snet-data`.
 - **Egress**: outbound NAT via a Container Apps environment outbound IP. Use that IP for any allowlisting (M365 SMTP relay, external webhooks).
 - **Reference**: [Microsoft Learn — Use private endpoints with Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/how-to-use-private-endpoint).
 
-## 14. Plugins + Available skills
+## 14. Repos and ownership
+
+Hybrid model — two repos, one workload.
+
+| Repo | Owns | Workflows |
+|---|---|---|
+| `plugport/plug-zammad` (this repo) | `Dockerfile`, Plug overlays, `docs/`, `CLAUDE.md`, `.env.example`, app deploy CI | `.github/workflows/ci.yml`, `.github/workflows/deploy.yml` |
+| `evinyacp/az-0265-infra` | All Terraform (modules `network`, `identity`, `data`, `apps`, `ai`), env config under `envs/prd/` | `.github/workflows/terraform.yml` (plan-on-PR, apply-on-main) |
+| `evinyacp/eviny-dns` | DNS zone `plugport.no` (Terraform) | post-merge `terraform apply` |
+
+Cross-repo coupling:
+- App deploy in this repo calls `az containerapp update` against resources whose Terraform lives in `az-0265-infra`. The contract is the resource names (`ca-prd-zammad-*`, `cajob-prd-zammad-init`).
+- Both repos authenticate as `az-0265-sp` via federated OIDC credentials — separate `subject` per repo. Adding a new repo to this trust requires a new federated credential.
+- The DNS PR in `evinyacp/eviny-dns` is opened from this repo's context (custom-domain bind for `operations.plugport.no`).
+
+## 15. Plugins + Available skills
 
 Required Claude Code plugins:
 
@@ -390,7 +403,7 @@ Optional:
 
 `plug-brand-design` skill is **not** used in this repo. Zammad has its own theming system.
 
-## 15. Mandatory use of skills + Recommended workflow
+## 16. Mandatory use of skills + Recommended workflow
 
 If there is greater than 1% chance a skill applies, USE it — before any response, including clarifying questions.
 

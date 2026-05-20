@@ -16,8 +16,8 @@ We accept the trade-offs:
 
 | Resource | Purpose |
 |---|---|
-| `st-plug-zammad` | Storage Account (GRS) |
-| `st-plug-zammad/zammad-storage` | File share — mounted into `ca-plug-zammad-{web,worker}` at `/opt/zammad/storage` |
+| `stprdzammad` | Storage Account (GRS) |
+| `stprdzammad/zammad-storage` | File share — mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` |
 
 The mount is declared on the Container Apps environment as a named storage definition, then referenced from each app's `template.volumes`.
 
@@ -38,7 +38,7 @@ resource "azurerm_container_app_environment_storage" "zammad" {
 After the first boot, tell Zammad to use the filesystem:
 
 ```bash
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('storage_provider', 'File')"
 ```
 
@@ -49,7 +49,7 @@ Existing tickets keep their attachments where they were. New attachments land un
 If we ever migrate from `DB` to `File` (or vice versa), use Zammad's built-in migration rake task:
 
 ```bash
-az containerapp exec -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rake zammad:store:migrate FROM=DB TO=File
 ```
 
@@ -60,10 +60,10 @@ Run this on a quiet window — it streams every attachment row, so it can take m
 The Storage Account is GRS, replicating to the paired region. We also enable a **daily file-share snapshot** with 14-day retention:
 
 ```bash
-az storage share-rm snapshot -n zammad-storage --storage-account st-plug-zammad
+az storage share-rm snapshot -n zammad-storage --storage-account stprdzammad
 ```
 
-Schedule via Azure Backup → backup policy `bp-plug-zammad-fileshare`. RPO target: 24h. Combined with Postgres 7-day PITR, total RTO for a full restore is well under 4h.
+Schedule via Azure Backup → backup policy `bp-prd-zammad-fileshare`. RPO target: 24h. Combined with Postgres 7-day PITR, total RTO for a full restore is well under 4h.
 
 ## Escape valves
 

@@ -15,7 +15,7 @@ resource "azurerm_dns_cname_record" "operations" {
   zone_name           = "plugport.no"
   resource_group_name = "rg-eacp-dns"
   ttl                 = 3600
-  record              = "ca-plug-zammad-web.<env>.azurecontainerapps.io"
+  record              = "ca-prd-zammad-web.<env>.azurecontainerapps.io"
 }
 
 resource "azurerm_dns_txt_record" "operations_asuid" {
@@ -40,7 +40,7 @@ PR workflow:
 ### Step 2. Get the verification ID
 
 ```bash
-az containerapp show -n ca-plug-zammad-web -g rg-plug-zammad \
+az containerapp show -n ca-prd-zammad-web -g rg-prd-zammad \
   --query properties.customDomainVerificationId -o tsv
 ```
 
@@ -48,7 +48,7 @@ Paste that into the `azurerm_dns_txt_record.operations_asuid` block before openi
 
 ### Step 3. Bind the custom domain
 
-Azure Portal → `ca-plug-zammad-web` → **Custom domains** → **Add custom domain**.
+Azure Portal → `ca-prd-zammad-web` → **Custom domains** → **Add custom domain**.
 
 - Domain: `operations.plugport.no`
 - Validation: TXT (already added in step 1)
@@ -60,7 +60,7 @@ Bind.
 
 ```bash
 dig +short operations.plugport.no
-# expect: ca-plug-zammad-web.<env>.azurecontainerapps.io.
+# expect: ca-prd-zammad-web.<env>.azurecontainerapps.io.
 #         <ip>
 
 curl -Iv https://operations.plugport.no
@@ -84,7 +84,7 @@ When we want centralised rate-limiting, geo-fencing, or WAF rules, swap to Azure
 
 High-level steps (for context only — do not implement until the issue is picked up):
 
-1. Stand up `afd-plug-zammad` (Front Door Premium) with origin `ca-plug-zammad-web.<env>.azurecontainerapps.io`.
+1. Stand up `afd-prd-zammad` (Front Door Premium) with origin `ca-prd-zammad-web.<env>.azurecontainerapps.io`.
 2. Add custom domain `operations.plugport.no` to Front Door — re-validate via TXT (a fresh `_dnsauth.operations` token).
 3. Move the CNAME in `eviny-dns` from the Container App FQDN to the Front Door endpoint.
 4. Configure WAF managed rule sets (OWASP, bot protection) and custom rules (rate-limit `/api/*`, geo-fence to Europe, require Entra ID for `/admin/*`).
