@@ -25,7 +25,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75  # 45 min init cap + ~30 min slack for build/roll/verify
     steps:
       - uses: actions/checkout@v4
 
@@ -74,13 +74,16 @@ jobs:
             -n cajob-prd-zammad-init -g "$RG" \
             --query name -o tsv)
           echo "Started init execution: $EXEC_NAME"
-          # Poll up to 20 min
-          for i in $(seq 1 80); do
+          # Poll up to 45 min. First-time setup (db:create + db:migrate +
+          # db:seed + ES index creation) runs in the 5-10 min range; the
+          # ceiling matches the job's replica_timeout_in_seconds=1800 plus
+          # slack for upstream registry pulls.
+          for i in $(seq 1 180); do
             STATUS=$(az containerapp job execution show \
               -n cajob-prd-zammad-init -g "$RG" \
               --job-execution-name "$EXEC_NAME" \
               --query properties.status -o tsv)
-            echo "[$i/80] status=$STATUS"
+            echo "[$i/180] status=$STATUS"
             case "$STATUS" in
               Succeeded) echo "init job succeeded"; exit 0 ;;
               Failed|Cancelled|Degraded)
@@ -93,7 +96,7 @@ jobs:
             esac
             sleep 15
           done
-          echo "init job timed out after 20 min"
+          echo "init job timed out after 45 min"
           exit 1
 
       - name: Roll long-running apps
