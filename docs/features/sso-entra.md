@@ -27,7 +27,7 @@ Store the secret value in Azure Key Vault:
 
 ```bash
 az keyvault secret set \
-  --vault-name kv-prd-zammad \
+  --vault-name kv-prd-zammad-ne \
   --name entra-zammad-client-secret \
   --value '<paste-secret-here>'
 ```
@@ -63,7 +63,7 @@ Sign in to Zammad as an admin and go to **Settings → Security → Third Party 
 1. Enable the integration.
 2. Paste:
    - **App ID** (from step 1)
-   - **App Secret** (retrieve from Key Vault: `az keyvault secret show --vault-name kv-prd-zammad --name entra-zammad-client-secret --query value -o tsv`)
+   - **App Secret** (retrieve from Key Vault: `az keyvault secret show --vault-name kv-prd-zammad-ne --name entra-zammad-client-secret --query value -o tsv`)
    - **Tenant ID** (from step 1)
 3. Enable **Automatic account link on initial sign-in** matched on email.
 4. Save.

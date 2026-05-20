@@ -22,10 +22,10 @@ Data plane:
 
 | Resource | Service | Notes |
 |---|---|---|
-| `pg-prd-zammad` | Azure DB for PostgreSQL Flexible Server | App DB. 7-day PITR. Private endpoint. |
-| `cache-prd-zammad` | Azure Cache for Redis (Basic C0/C1) | Sidekiq queue + Rails cache. TLS only. |
-| `stprdzammad` | Storage Account → Azure Files (SMB share `zammad-storage`) | Attachments. Mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` via Container Apps `AzureFile` volume. GRS. Blob is **not** natively mountable on Container Apps — Files is the supported path. |
-| `kv-prd-zammad` | Azure Key Vault | All long-lived secrets (DB password, Redis key, Entra client secret, SMTP creds). Referenced from Container Apps as secret refs. |
+| `pg-prd-zammad-ne` | Azure DB for PostgreSQL Flexible Server | App DB. 7-day PITR. Private endpoint. |
+| `cache-prd-zammad-ne` | Azure Cache for Redis (Basic C0/C1) | Sidekiq queue + Rails cache. TLS only. |
+| `stprdzammadne` | Storage Account → Azure Files (SMB share `zammad-storage`) | Attachments. Mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` via Container Apps `AzureFile` volume. GRS. Blob is **not** natively mountable on Container Apps — Files is the supported path. |
+| `kv-prd-zammad-ne` | Azure Key Vault | All long-lived secrets (DB password, Redis key, Entra client secret, SMTP creds). Referenced from Container Apps as secret refs. |
 | `crplugport` | Azure Container Registry | Lives in a different subscription. `az-0265-sp` has `AcrPull` cross-sub. |
 
 Traffic flow:
@@ -48,10 +48,10 @@ Traffic flow:
    ║  zammad-web  websocket      opensearch     memcached      worker/scheduler  ║
    ║  (+nginx)                   (internal)                                      ║
    ║   │  │  │  │      │              ▲              ▲              │            ║
-   ║   │  │  │  └── AzureFile mount ──┼──► stprdzammad (zammad-storage share)    ║
+   ║   │  │  │  └── AzureFile mount ──┼──► stprdzammadne (zammad-storage share)    ║
    ║   │  │  └── memcached ───────────┼──────────────┘              │            ║
-   ║   │  └── redis ──────────────────┼──► cache-prd-zammad                      ║
-   ║   └── psql ──► [Private EP] ─────┼──► pg-prd-zammad (Flexible Server)       ║
+   ║   │  └── redis ──────────────────┼──► cache-prd-zammad-ne                      ║
+   ║   └── psql ──► [Private EP] ─────┼──► pg-prd-zammad-ne (Flexible Server)       ║
    ║                                  │                              │            ║
    ║                                  ▼                              │            ║
    ║                            cajob-prd-zammad-init (one-off, runs before      ║
@@ -150,7 +150,7 @@ az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
 Postgres:
 
 ```bash
-az postgres flexible-server connect -n pg-prd-zammad -u zammad -d zammad_production
+az postgres flexible-server connect -n pg-prd-zammad-ne -u zammad -d zammad_production
 ```
 
 PR shortcuts:
@@ -163,11 +163,11 @@ gh pr merge --squash --delete-branch
 
 ## 6. Azure resources
 
-All resources live in resource group `rg-prd-zammad` inside subscription `az-0265-online-plugas-prd-prd-ammad` (Eviny ACP-managed; display-name typo locked — use subscription ID in CI/CD), region `West Europe`. AAD owners group: `az-0265-owners`. Service principal: `az-0265-sp` (pre-wired with OIDC by ACP). ACR `crplugport` is **cross-subscription**; `az-0265-sp` is granted `AcrPull` on it.
+All resources live in resource group `rg-prd-zammad` inside subscription `az-0265-online-plugas-prd-prd-ammad` (Eviny ACP-managed; display-name typo locked — use subscription ID in CI/CD), region `Norway East`. AAD owners group: `az-0265-owners`. Service principal: `az-0265-sp` (pre-wired with OIDC by ACP). ACR `crplugport` is **cross-subscription**; `az-0265-sp` is granted `AcrPull` on it.
 
 | Resource | Role | FQDN / identifier | Produces (env var → secret ref) |
 |---|---|---|---|
-| `ca-prd-zammad-web` | Rails web | `ca-prd-zammad-web.<env>.azurecontainerapps.io` (also `operations.plugport.no` via custom domain) | — |
+| `ca-prd-zammad-web` | Rails web | `ca-prd-zammad-web.<env>.azurecontainerapps.io` where `<env>` is `cae-prd-zammad`'s default domain (currently `orangemoss-71bfd191.norwayeast`). Also `operations.plugport.no` via custom domain. | — |
 | `ca-prd-zammad-websocket` | WebSocket server | internal | — |
 | `ca-prd-zammad-worker` | Sidekiq workers | internal | — |
 | `ca-prd-zammad-scheduler` | Cron / scheduler | internal | — |
@@ -175,10 +175,10 @@ All resources live in resource group `rg-prd-zammad` inside subscription `az-026
 | `ca-prd-zammad-memcached` | Memcached | `ca-prd-zammad-memcached:11211` (internal) | `MEMCACHE_SERVERS=ca-prd-zammad-memcached:11211` |
 | `cajob-prd-zammad-init` | Container Apps Job — migrations | — | invoked as `az containerapp job start` before each version bump |
 | `vnet-prd-zammad` | VNet for Container Apps env + private endpoints | subnets: `snet-apps` (delegated to Container Apps), `snet-data` (Postgres PE) | Private DNS zone `privatelink.postgres.database.azure.com` linked |
-| `pg-prd-zammad` | App database | `pg-prd-zammad.postgres.database.azure.com` (resolved via Private DNS to `snet-data`) | `POSTGRES_HOST`, `POSTGRES_PASS` ← `kv-prd-zammad/postgres-password` |
-| `cache-prd-zammad` | Redis | `cache-prd-zammad.redis.cache.windows.net:6380` | `REDIS_URL` ← `kv-prd-zammad/redis-url` |
-| `stprdzammad` | Azure Files (`zammad-storage` share) | `stprdzammad.file.core.windows.net` | mounted at `/opt/zammad/storage`; storage provider set at runtime via `Setting.set('storage_provider', 'File')` |
-| `kv-prd-zammad` | Secrets store | `kv-prd-zammad.vault.azure.net` | all secret refs |
+| `pg-prd-zammad-ne` | App database | `pg-prd-zammad-ne.postgres.database.azure.com` (resolved via Private DNS to `snet-data`) | `POSTGRES_HOST`, `POSTGRES_PASS` ← `kv-prd-zammad-ne/postgres-password` |
+| `cache-prd-zammad-ne` | Redis | `cache-prd-zammad-ne.redis.cache.windows.net:6380` | `REDIS_URL` ← `kv-prd-zammad-ne/redis-url` |
+| `stprdzammadne` | Azure Files (`zammad-storage` share) | `stprdzammadne.file.core.windows.net` | mounted at `/opt/zammad/storage`; storage provider set at runtime via `Setting.set('storage_provider', 'File')` |
+| `kv-prd-zammad-ne` | Secrets store | `kv-prd-zammad-ne.vault.azure.net` | all secret refs |
 | `log-prd-zammad` | Log Analytics workspace | — | Container Apps + Postgres + Redis diagnostic logs |
 | `az-0265-sp` | Service principal (CI/CD) | — | federated credentials only, no client secret |
 | `crplugport` | ACR (cross-sub) | `crplugport.azurecr.io` | image registry |
@@ -210,7 +210,7 @@ GitHub Actions workflows in this repo live in `.github/workflows/`. Authenticate
 ### Secrets in CI
 
 - Workload identity federation between GitHub Actions and Entra ID. `az-0265-sp` is scoped to `rg-prd-zammad` only (Contributor) + `AcrPush` on `crplugport`.
-- Container Apps reads runtime secrets from `kv-prd-zammad` via secret references — never from GitHub Actions.
+- Container Apps reads runtime secrets from `kv-prd-zammad-ne` via secret references — never from GitHub Actions.
 
 ### Log monitoring policy
 
@@ -319,7 +319,7 @@ Zammad sends:
 ### Backups
 
 - **Postgres**: 7-day point-in-time restore on Flexible Server. Geo-redundant backup storage.
-- **Attachments** (`stprdzammad` Azure Files share): GRS replication (West Europe → North Europe). File-share-level snapshot daily, retained 14 days.
+- **Attachments** (`stprdzammadne` Azure Files share): GRS replication (Norway East → Norway West, the regional pair). File-share-level snapshot daily, retained 14 days.
 - **Target**: RTO 4h / RPO 1h.
 
 ### Monitoring
@@ -365,9 +365,9 @@ Container Apps must reach Postgres Flexible Server over a private endpoint, so t
 
 - **VNet**: `vnet-prd-zammad` (`10.40.0.0/16`).
   - `snet-apps` (`/23`, delegated to `Microsoft.App/environments`) — Container Apps environment subnet.
-  - `snet-data` (`/27`) — Private Endpoints for `pg-prd-zammad`.
+  - `snet-data` (`/27`) — Private Endpoints for `pg-prd-zammad-ne`.
 - **Private DNS zones** linked to the VNet:
-  - `privatelink.postgres.database.azure.com` — resolves `pg-prd-zammad.postgres.database.azure.com` to the PE in `snet-data`.
+  - `privatelink.postgres.database.azure.com` — resolves `pg-prd-zammad-ne.postgres.database.azure.com` to the PE in `snet-data`.
 - **Egress**: outbound NAT via a Container Apps environment outbound IP. Use that IP for any allowlisting (M365 SMTP relay, external webhooks).
 - **Reference**: [Microsoft Learn — Use private endpoints with Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/how-to-use-private-endpoint).
 
