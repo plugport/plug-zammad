@@ -4,6 +4,93 @@ Zammad on Azure Container Apps, exposed at `https://operations.plugport.no`. Int
 
 ---
 
+## 0. Live status (snapshot 2026-05-20)
+
+A truthful snapshot of where the deployment actually stands today, so a new session can pick up without guessing. Update this section as facts move.
+
+### Identities and locations
+
+| Item | Value |
+|---|---|
+| Workload subscription | `az-0265-online-plugas-prd-prd-ammad` (ID `7ffb20c8-2855-49e4-99f0-23ea9bcb706e`; "ammad" typo is locked by Eviny ACP, ignore — use the ID) |
+| Region | `norwayeast` (migrated from `westeurope` after AKS capacity error in WEU on 2026-05-20) |
+| Resource group | `rg-prd-zammad` |
+| AAD owners group | `az-0265-owners` (Eyvind is a member) |
+| Service principal | `az-0265-sp` (app ID `a7141a4c-8174-491f-960b-a9b4eedac81a`, OIDC pre-wired by ACP) |
+| Tenant | `eviny.no` (ID `12f1bdca-9eec-45f6-a63e-2061b957e8ee`) |
+
+### Repos
+
+| Repo | Owns |
+|---|---|
+| `plugport/plug-zammad` (this repo) | Dockerfile, CI/CD, app overlays, all docs |
+| `evinyacp/az-0265-infra` | All Terraform (flat layout under `infrastructure/`) |
+| `evinyacp/eviny-dns` | DNS for `plugport.no` (PRs need `@evinyacp/az-eacp-owner` review) |
+
+### Live Azure resources
+
+| Resource | Status |
+|---|---|
+| `vnet-prd-zammad` (`10.40.0.0/16`) + `snet-apps`, `snet-data`, 2 NSGs | ✅ Live |
+| `pg-prd-zammad-ne` (Postgres FS 16, GP_Standard_D2ds_v4) | ✅ Live with PE |
+| `cache-prd-zammad-ne` (Redis Standard C0) | ✅ Live with PE |
+| `stprdzammadne` (Storage Account + file share `zammad-storage`) | ✅ Live with PE |
+| `kv-prd-zammad-ne` (Key Vault Standard, RBAC) | ✅ Live with PE; 4 secrets via ARM-plane |
+| `mi-prd-zammad-apps` (user-assigned MI) | ✅ Live, has Secrets User on KV |
+| `log-prd-zammad` (Log Analytics) | ✅ Live |
+| `cae-prd-zammad` (Container Apps env) | ✅ Live; default domain `orangemoss-71bfd191.norwayeast.azurecontainerapps.io` |
+| 6 Container Apps + `cajob-prd-zammad-init` | ✅ Live, all on placeholder helloworld image |
+| 5 Private DNS zones + VNet-links | ✅ Live |
+| `crprdzammad` ACR (own workload sub) | ⏳ Pending — DA-90 |
+| Federated credential for `plugport/plug-zammad` on `az-0265-sp` | ⏳ Pending — DA-87 |
+
+### Bootstrap-prompt corrections (for future reference)
+
+The original bootstrap prompt in `docs/claude-md-bootstrap.md` named several things that turned out to be fictional or wrong once ACP delivered the real environment. The corrections, all already applied here:
+
+| Bootstrap name | Real value |
+|---|---|
+| `sub-plug-zammad` | `az-0265-online-plugas-prd-prd-ammad` (ACP-issued) |
+| `sp-plug-zammad` | `az-0265-sp` (ACP-pre-wired with OIDC) |
+| `crplugport` ACR | Not a real registry. Plug's pattern is one ACR per workload (see `crpluganalytics` in `plug-analytics`). We use `crprdzammad` in the workload sub. |
+| `westeurope` region | Migrated to `norwayeast` after AKS capacity error. Norway East is also Eviny ACP default. |
+
+### Open infra constraints (sticky)
+
+- `az-0265-sp` lacks `Microsoft.Network/ddosProtectionPlans/join/action` on the centralised `eacp-ddos-norwayeast` plan. The VNet was therefore created by **local apply as Eyvind** (user has MG-inherited join). Subsequent applies work because `ignore_changes = [ddos_protection_plan]` keeps Terraform from touching that attribute. See DA-95.
+- `CI - Terraform Plan` workflow in `evinyacp/az-0265-infra` returns `startup_failure` on every PR-time trigger. `CD - Terraform Apply` on push-to-main works. We post `terraform plan` output as a PR comment manually; see `docs/features/infra-runbook.md`. See DA-95.
+- KV `public_network_access_enabled = false`. `azurerm_key_vault_secret` (data plane) is unreachable from CI runners and dev laptops. Secrets are written via `azapi_resource` against the ARM control plane (DELETE via that endpoint is not supported — use `terraform state rm` for renames). See DA-95.
+- Postgres FS soft-delete is 7 days; Storage account soft-delete ~14 days; Key Vault purge-protected with 90-day soft-delete. The four `-ne`-suffixed resources exist because their pre-migration WEU siblings still hold the names.
+
+### Linear
+
+- Workspace `Plugport`, team `Dataplattform` (ID `ca2acb0a-804f-482d-af55-6afcd9bde58c`), project `Zammad` (ID `9706db9e-9f1c-43ae-9102-0b87f6b43ee5`).
+- Active workflow:
+
+```
+DA-84 ACP order               ✅ Done
+DA-86 Terraform network       ✅ Done
+DA-87 Identity supplement     🟡 In Refinement (MI done via DA-88; federated cred + ACR roles pending)
+DA-88 Terraform data          ✅ Done
+DA-89 Terraform apps          ✅ Done
+DA-90 Dockerfile + CI         🔵 In Progress
+DA-91 Azure OpenAI            🟡 In Refinement (blocked by DA-90)
+DA-92 Custom domain + TLS     🟡 In Refinement (blocked by DA-90)
+DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
+DA-85 SMTP decision           🟡 In Refinement
+DA-95 Eviny escalations       🔵 In Progress (samleboks)
+```
+
+### What's next
+
+1. Add `crprdzammad` ACR in the workload sub via Terraform (`evinyacp/az-0265-infra`).
+2. Add federated credentials on `az-0265-sp` for `plugport/plug-zammad` ref/main and pull_request.
+3. Write `Dockerfile`, `ci.yml`, `deploy.yml` here. Image: `zammad/zammad:6.5` or current 7.x stable on Docker Hub.
+4. First end-to-end deploy: image push to ACR → `cajob-prd-zammad-init` runs migrations → six apps roll over → `curl -I https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/` returns 200 on the real Zammad.
+5. Then DA-92 (custom domain) and DA-93 (SSO) in sequence.
+
+---
+
 ## 1. Architecture
 
 Zammad is a Rails application split into several long-running processes, a search engine, a cache, and a one-off init job. On Azure Container Apps each process runs as its own Container App in resource group `rg-prd-zammad` (subscription `az-0265-online-plugas-prd-prd-ammad` — name set by Eviny ACP; the typo `ammad` is locked, use the subscription **ID** as source of truth in scripts). Image pin: `zammad/zammad:7.0.x` (latest stable 7.x). Architecture mirrors the upstream `zammad-docker-compose` services.
@@ -26,7 +113,7 @@ Data plane:
 | `cache-prd-zammad-ne` | Azure Cache for Redis (Basic C0/C1) | Sidekiq queue + Rails cache. TLS only. |
 | `stprdzammadne` | Storage Account → Azure Files (SMB share `zammad-storage`) | Attachments. Mounted into `ca-prd-zammad-{web,worker}` at `/opt/zammad/storage` via Container Apps `AzureFile` volume. GRS. Blob is **not** natively mountable on Container Apps — Files is the supported path. |
 | `kv-prd-zammad-ne` | Azure Key Vault | All long-lived secrets (DB password, Redis key, Entra client secret, SMTP creds). Referenced from Container Apps as secret refs. |
-| `crplugport` | Azure Container Registry | Lives in a different subscription. `az-0265-sp` has `AcrPull` cross-sub. |
+| `crprdzammad` | Azure Container Registry | Lives in **this** subscription (own ACR per workload, same pattern as `crpluganalytics`). `az-0265-sp` gets `AcrPush` + `AcrPull` via Terraform. |
 
 Traffic flow:
 
@@ -126,7 +213,7 @@ Azure (against `az-0265-online-plugas-prd-prd-ammad`):
 az account set --subscription az-0265-online-plugas-prd-prd-ammad
 az containerapp list -g rg-prd-zammad -o table
 az containerapp revision list -n ca-prd-zammad-web -g rg-prd-zammad -o table
-az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crplugport.azurecr.io/zammad:<sha>
+az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>
 az containerapp revision activate -n ca-prd-zammad-web -g rg-prd-zammad --revision <previous>   # rollback
 az containerapp logs show -n ca-prd-zammad-web -g rg-prd-zammad --follow
 
@@ -163,7 +250,7 @@ gh pr merge --squash --delete-branch
 
 ## 6. Azure resources
 
-All resources live in resource group `rg-prd-zammad` inside subscription `az-0265-online-plugas-prd-prd-ammad` (Eviny ACP-managed; display-name typo locked — use subscription ID in CI/CD), region `Norway East`. AAD owners group: `az-0265-owners`. Service principal: `az-0265-sp` (pre-wired with OIDC by ACP). ACR `crplugport` is **cross-subscription**; `az-0265-sp` is granted `AcrPull` on it.
+All resources live in resource group `rg-prd-zammad` inside subscription `az-0265-online-plugas-prd-prd-ammad` (Eviny ACP-managed; display-name typo locked — use subscription ID in CI/CD), region `Norway East`. AAD owners group: `az-0265-owners`. Service principal: `az-0265-sp` (pre-wired with OIDC by ACP). ACR `crprdzammad` lives in the same subscription; `az-0265-sp` gets `AcrPush` (CI build) and `AcrPull` (deploys) via Terraform.
 
 | Resource | Role | FQDN / identifier | Produces (env var → secret ref) |
 |---|---|---|---|
@@ -181,7 +268,7 @@ All resources live in resource group `rg-prd-zammad` inside subscription `az-026
 | `kv-prd-zammad-ne` | Secrets store | `kv-prd-zammad-ne.vault.azure.net` | all secret refs |
 | `log-prd-zammad` | Log Analytics workspace | — | Container Apps + Postgres + Redis diagnostic logs |
 | `az-0265-sp` | Service principal (CI/CD) | — | federated credentials only, no client secret |
-| `crplugport` | ACR (cross-sub) | `crplugport.azurecr.io` | image registry |
+| `crprdzammad` | ACR (same sub) | `crprdzammad.azurecr.io` | image registry |
 
 ## 7. CI/CD
 
@@ -199,17 +286,17 @@ GitHub Actions workflows in this repo live in `.github/workflows/`. Authenticate
 ### Stages
 
 1. **Validate** — `yamllint`, `terraform fmt -check`, `helm lint` (if any), `gitleaks`, Conventional Commits lint.
-2. **Build** — container image built from `zammad/zammad:7.0.x` (pinned to a specific patch) + Plug overlays, tagged with `${{ github.sha }}` and pushed to `crplugport.azurecr.io/zammad:<sha>`.
+2. **Build** — container image built from `zammad/zammad:7.0.x` (pinned to a specific patch) + Plug overlays, tagged with `${{ github.sha }}` and pushed to `crprdzammad.azurecr.io/zammad:<sha>`.
 3. **Test** — health-check the built image (`docker run --rm <img> rails runner 'puts "ok"'`), run config-validation scripts.
 4. **Deploy** — strict order:
-   1. `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image crplugport.azurecr.io/zammad:<sha>` and wait for it to succeed (runs `rake db:migrate`). Long-running apps must **not** start on the new image until migrations finish.
-   2. `az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crplugport.azurecr.io/zammad:<sha>`. Wait for new revision to become healthy.
+   1. `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>` and wait for it to succeed (runs `rake db:migrate`). Long-running apps must **not** start on the new image until migrations finish.
+   2. `az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>`. Wait for new revision to become healthy.
    3. Repeat the update for `websocket`, `worker`, `scheduler`, `memcached` (memcached only on infra changes).
 5. **Verify** — hit `https://operations.plugport.no/api/v1/users/me` with a service-account token → expect HTTP 200. Hit `/` → expect HTTP 200 + expected HTML title.
 
 ### Secrets in CI
 
-- Workload identity federation between GitHub Actions and Entra ID. `az-0265-sp` is scoped to `rg-prd-zammad` only (Contributor) + `AcrPush` on `crplugport`.
+- Workload identity federation between GitHub Actions and Entra ID. `az-0265-sp` has Owner on the workload subscription (ACP-issued) and additionally `AcrPush` on `crprdzammad`; the apps' user-assigned managed identity (`mi-prd-zammad-apps`) carries `AcrPull` for runtime image pulls.
 - Container Apps reads runtime secrets from `kv-prd-zammad-ne` via secret references — never from GitHub Actions.
 
 ### Log monitoring policy
