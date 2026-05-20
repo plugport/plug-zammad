@@ -60,9 +60,18 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          EXEC_NAME=$(az containerapp job start \
+          # `az containerapp job start --image X` replaces the entire
+          # container template — args, env, secrets, cpu, memory all get
+          # wiped for that execution. Persist the image into the job spec
+          # first (terraform `ignore_changes` on image keeps this from
+          # round-tripping into state drift), then start the job from the
+          # already-correct template.
+          az containerapp job update \
             -n cajob-prd-zammad-init -g "$RG" \
             --image "$IMAGE:$SHA" \
+            --output none
+          EXEC_NAME=$(az containerapp job start \
+            -n cajob-prd-zammad-init -g "$RG" \
             --query name -o tsv)
           echo "Started init execution: $EXEC_NAME"
           # Poll up to 20 min
@@ -102,19 +111,52 @@ jobs:
           done
 
       - name: Verify web endpoint
+        env:
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           FQDN=$(az containerapp show -n ca-prd-zammad-web -g "$RG" \
             --query properties.configuration.ingress.fqdn -o tsv)
           echo "Checking https://$FQDN/"
-          # Allow a brief warm-up
-          for i in $(seq 1 12); do
+          # 200/302 alone isn't enough: Container Apps serves the previous
+          # healthy revision (here: aci-helloworld) when the new revision
+          # has no healthy replicas. Helloworld also returns 200 with
+          # `x-powered-by: Express`. We need positive evidence the real
+          # Zammad revision is the one answering — checking that the active
+          # revision points at the SHA we just pushed.
+          # JMESPath fragments kept on their own lines to satisfy yamllint's
+          # 120-char ceiling.
+          ACTIVE_QUERY="[?properties.trafficWeight==\`100\` && properties.healthState=='Healthy']"
+          ACTIVE_QUERY+=".properties.template.containers[0].image | [0]"
+          for i in $(seq 1 30); do
+            ACTIVE_IMAGE=$(az containerapp revision list \
+              -n ca-prd-zammad-web -g "$RG" \
+              --query "$ACTIVE_QUERY" -o tsv || echo "")
             CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://$FQDN/" || echo "000")
-            echo "[$i/12] HTTP $CODE"
-            if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
-              exit 0
-            fi
-            sleep 10
+            EXPRESS=$(curl -sI "https://$FQDN/" | grep -i '^x-powered-by:' || true)
+            echo "[$i/30] HTTP=$CODE active_image=$ACTIVE_IMAGE express_header=$EXPRESS"
+            case "$ACTIVE_IMAGE" in
+              "$IMAGE:$SHA")
+                if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
+                  if [ -n "$EXPRESS" ]; then
+                    echo "active revision is on the SHA but response still shows Express header — investigate"
+                    exit 1
+                  fi
+                  echo "verified: Zammad on $IMAGE:$SHA returning $CODE"
+                  exit 0
+                fi
+                ;;
+            esac
+            sleep 15
           done
-          echo "web endpoint never returned 200/302"
+          echo "web app never converged to ${IMAGE}:${SHA} returning 200/302"
+          echo "--- revisions ---"
+          REVS_QUERY='[].{name: name,'
+          REVS_QUERY+=' image: properties.template.containers[0].image,'
+          REVS_QUERY+=' active: properties.active,'
+          REVS_QUERY+=' healthy: properties.healthState,'
+          REVS_QUERY+=' traffic: properties.trafficWeight}'
+          az containerapp revision list \
+            -n ca-prd-zammad-web -g "$RG" \
+            --query "$REVS_QUERY" -o table
           exit 1
