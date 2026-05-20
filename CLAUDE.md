@@ -72,23 +72,27 @@ DA-84 ACP order               ✅ Done
 DA-86 Terraform network       ✅ Done
 DA-87 Identity supplement     ✅ Done (MI, federated cred, AcrPush all in place)
 DA-88 Terraform data          ✅ Done
-DA-89 Terraform apps          ✅ Done (resources scaffolded — but containers are still aci-helloworld placeholders, see DA-96)
-DA-90 Dockerfile + CI         🟣 In Review (PR #9 merged: Dockerfile + ci.yml + deploy.yml; DoD#2 blocked by DA-96)
-DA-96 apps.tf container state 🟡 In Refinement (command/env/secrets/volumes — blocks DA-90 DoD#2, DA-92, DA-93)
-DA-91 Azure OpenAI            🟡 In Refinement (blocked by DA-90)
-DA-92 Custom domain + TLS     🟡 In Refinement (blocked by DA-96 → DA-90)
+DA-89 Terraform apps          ✅ Done
+DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, deploy.yml — green E2E)
+DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
+DA-92 Custom domain + TLS     🟡 In Refinement (next up — unblocked by DA-90)
 DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
+DA-91 Azure OpenAI            🟡 In Refinement
 DA-85 SMTP decision           🟡 In Refinement
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
 ```
 
 ### What's next
 
-DA-90 app-repo files merged in PR #9 (`Dockerfile` pins `ghcr.io/zammad/zammad:7.0.1-0045`; `ci.yml`, `deploy.yml`, `.yamllint`, `.github/commitlint.config.cjs`, `.dockerignore`). CI is green. First deploy on `main` revealed that the Container Apps are bare `aci-helloworld` placeholders (`command: null, env: null, secrets: []`) — the Zammad image was started with no command and the init job hung on the default-CMD `zammad-railsserver` until the 20-min poll timed out.
+Zammad is **live** at https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/ — `<title>Zammad Helpdesk</title>`, healthy revision on `crprdzammad.azurecr.io/zammad:<sha>`, `/api/v1/getting_started` returns 200. Six long-running Container Apps + the init job all carry the real Zammad image and Plug's env/secret refs.
 
-That makes the next step **DA-96** in `evinyacp/az-0265-infra/infrastructure/apps.tf`: per-app `command` + `args` (e.g. `zammad-init`, `zammad-railsserver`, `zammad-scheduler`, `zammad-websocket`, `zammad-nginx` sidecar), the env-var → KV secret-ref wiring from §6, the `/opt/zammad/storage` Azure Files mount, and `mi-prd-zammad-apps` bound as the AcrPull + KV-secrets identity on each app.
+Next up:
+- **DA-92** — custom domain `operations.plugport.no` + Let's Encrypt managed cert on `ca-prd-zammad-web`. Needs the DNS change in `evinyacp/eviny-dns` (CNAME + asuid TXT) and a portal/CLI bind. See `docs/features/dns-tls.md`.
+- **DA-93** — Entra SSO go-live: app reg in the Plug tenant, paste client secret from KV into the Zammad admin UI, disable local password login. Blocked by DA-92 (the redirect URI is the public FQDN). See `docs/features/sso-entra.md`.
 
-Once DA-96 lands, re-run `deploy.yml` via `workflow_dispatch` against `main`. Expected: init job reaches `Succeeded`, the four long-running apps roll to `crprdzammad.azurecr.io/zammad:<sha>`, and `curl -I https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/` returns 200/302. That closes DA-90 DoD#2 and unblocks DA-92 (custom domain) → DA-93 (SSO).
+Lower-priority follow-ups, no Linear issues yet:
+- nginx sidecar on `ca-prd-zammad-web` — needs sidecar-aware `az containerapp update --container-name` loop in `deploy.yml`.
+- Persistent storage for the opensearch app (Azure Files mount on `/usr/share/elasticsearch/data`). Zammad reindexes from Postgres on restart, so this is durability/perf, not correctness.
 
 ---
 
@@ -218,15 +222,18 @@ az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crprdzammad
 az containerapp revision activate -n ca-prd-zammad-web -g rg-prd-zammad --revision <previous>   # rollback
 az containerapp logs show -n ca-prd-zammad-web -g rg-prd-zammad --follow
 
-# Run the migrations job before bumping long-running apps
-az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad
+# Bump the init job image, then start it (passing --image to job start
+# clobbers the rest of the template — see §7).
+az containerapp job update -n cajob-prd-zammad-init -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>
+az containerapp job start  -n cajob-prd-zammad-init -g rg-prd-zammad
 ```
 
 Post-install / post-version-bump (Rails console via `exec`). See `docs/features/post-install.md` for the full runbook:
 
 ```bash
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('es_url', 'http://ca-prd-zammad-opensearch:9200')"
+# es_url is now auto-set by the upstream entrypoint from ELASTICSEARCH_HOST/PORT
+# env vars (set in apps.tf via local.opensearch_host). Override here only if you
+# need to point Rails at a different ES instance than the init bootstrap.
 az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
   -- rails r "Setting.set('storage_provider', 'File')"
 az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
@@ -289,11 +296,10 @@ GitHub Actions workflows in this repo live in `.github/workflows/`. Authenticate
 1. **Validate** — `yamllint`, `terraform fmt -check`, `helm lint` (if any), `gitleaks`, Conventional Commits lint.
 2. **Build** — container image built from `ghcr.io/zammad/zammad:7.0.1-0045` (pinned in `Dockerfile` via `ARG ZAMMAD_VERSION`), tagged with `${{ github.sha }}` and pushed to `crprdzammad.azurecr.io/zammad:<sha>`.
 3. **Test** — health-check the built image (`docker run --rm <img> rails runner 'puts "ok"'`), run config-validation scripts.
-4. **Deploy** — strict order:
-   1. `az containerapp job start -n cajob-prd-zammad-init -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>` and wait for it to succeed (runs `rake db:migrate`). Long-running apps must **not** start on the new image until migrations finish.
-   2. `az containerapp update -n ca-prd-zammad-web -g rg-prd-zammad --image crprdzammad.azurecr.io/zammad:<sha>`. Wait for new revision to become healthy.
-   3. Repeat the update for `websocket`, `worker`, `scheduler`, `memcached` (memcached only on infra changes).
-5. **Verify** — hit `https://operations.plugport.no/api/v1/users/me` with a service-account token → expect HTTP 200. Hit `/` → expect HTTP 200 + expected HTML title.
+4. **Deploy** — strict order. See `deploy.yml` for the exact commands; two non-obvious moves:
+   1. **Init job:** `az containerapp job update --image ...` first, **then** `az containerapp job start` *without* `--image`. Passing `--image` to `job start` silently replaces the entire container template (args/env/secrets/cpu/memory) for that execution — observed live, the job reports `Succeeded` in 30s while doing nothing. `job update` persists the image into the spec (terraform `lifecycle.ignore_changes` on `container[0].image` keeps it from drifting state), and a plain `job start` then uses the full template.
+   2. **Long-running apps:** `az containerapp update --image` per app — this one only patches the image and preserves args/env. Order: web → websocket → worker → scheduler. `memcached` and `opensearch` keep upstream images and are not updated here.
+5. **Verify** — don't just check `200/302`. Container Apps falls back to the previous healthy revision when the new revision has no healthy replicas, and the helloworld fallback image serves 200 with `x-powered-by: Express`. Assert that the revision with `trafficWeight=100, healthState=Healthy` is on the SHA we just pushed AND that the response has no `x-powered-by` header.
 
 ### Secrets in CI
 
@@ -457,6 +463,7 @@ Container Apps must reach Postgres Flexible Server over a private endpoint, so t
 - **Private DNS zones** linked to the VNet:
   - `privatelink.postgres.database.azure.com` — resolves `pg-prd-zammad-ne.postgres.database.azure.com` to the PE in `snet-data`.
 - **Egress**: outbound NAT via a Container Apps environment outbound IP. Use that IP for any allowlisting (M365 SMTP relay, external webhooks).
+- **Inter-app DNS — must use the FQDN, NOT the short name.** Despite what the Microsoft docs hint at, `ca-prd-zammad-opensearch` does NOT resolve cross-app inside the env. The init job's curl against the short name hung silently on the 30s TCP timeout before we discovered this. The form that actually works is `<app>.internal.<env-default-domain>` — e.g. `ca-prd-zammad-opensearch.internal.orangemoss-71bfd191.norwayeast.azurecontainerapps.io`. `MEMCACHE_SERVERS`, `ELASTICSEARCH_HOST`, and any future inter-app URL must use the full form. The `default_domain` is exported as a Terraform output and consumed via `local.env_default_domain` in `evinyacp/az-0265-infra/infrastructure/locals.tf`.
 - **Reference**: [Microsoft Learn — Use private endpoints with Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/how-to-use-private-endpoint).
 
 ## 14. Repos and ownership
