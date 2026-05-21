@@ -22,22 +22,43 @@ Most "post-install settings" for Zammad are now applied automatically by the ups
 
 ## Manual Settings
 
-Run these in any order via the Rails console inside the web container. They are idempotent.
+Run these via `bundle exec rails r` inside the web container. They are idempotent. Three things to know first (all hit at DA-92):
+
+- `az containerapp exec --command "rails r ..."` returns `ClusterExecFailure code: 500` even when the connection succeeds. Use the interactive shell path below instead.
+- Inside the container, `rails` is not on `PATH` — go via `bundle exec` from `/opt/zammad`.
+- Setting writes go to Postgres, so it doesn't matter which revision/replica you exec into — even a stale healthy revision (e.g. `ca-prd-zammad-web--0000006`) works fine and is sometimes more reliable than the latest one if it's still `Activating`.
 
 ```bash
+# Drop into a shell on the web container (let az pick the active replica)
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad --container web
+
+# (Or pin to a known-healthy revision if the latest is Activating)
+# az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
+#   --revision ca-prd-zammad-web--0000006 --container web
+```
+
+Then at the in-container `$` prompt:
+
+```bash
+cd /opt/zammad
+
 # Tell Zammad to store attachments on the mounted Azure Files share
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('storage_provider', 'File')"
+bundle exec rails r "Setting.set('storage_provider', 'File')"
 
 # Public hostname (used in outbound mail, SSO callback URLs, etc.)
-# Update this to operations.plugport.no once DA-92 lands the custom domain.
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('fqdn', 'operations.plugport.no')"
+bundle exec rails r "Setting.set('fqdn', 'operations.plugport.no')"
 
 # Force HTTPS scheme in generated URLs
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('http_type', 'https')"
+bundle exec rails r "Setting.set('http_type', 'https')"
+
+# Verify
+bundle exec rails r "puts Setting.get('fqdn'); puts Setting.get('http_type')"
+# expect:
+#   operations.plugport.no
+#   https
 ```
+
+Exit with `exit` then `Ctrl+D` to close the az exec session. Each `bundle exec rails r` takes 5-10 s while Rails boots; memcached "is down" warnings printed during boot on a stale revision are cosmetic (revision still uses the pre-DA-112 MEMCACHE_SERVERS FQDN form) and don't affect the setting write.
 
 The initial search index is built by `cajob-prd-zammad-init` itself (the entrypoint's `zammad-init` dispatch handles `db:seed` + ES setup). Only run a manual rebuild after a Zammad version bump whose release notes flag a mapping change — see the version-bump runbook below.
 

@@ -76,7 +76,7 @@ DA-88 Terraform data          ✅ Done
 DA-89 Terraform apps          ✅ Done
 DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, deploy.yml — green E2E)
 DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
-DA-92 Custom domain + TLS     🟡 In Refinement (next up — unblocked by DA-90)
+DA-92 Custom domain + TLS     ✅ Done (operations.plugport.no bound 2026-05-21, DigiCert managed cert, Zammad fqdn+http_type set)
 DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
 DA-91 Azure OpenAI            ✅ Done (infra live, worker rolled — manual Setting.set still pending per ai.md)
 DA-85 SMTP decision           🟡 In Refinement
@@ -229,19 +229,26 @@ az containerapp job update -n cajob-prd-zammad-init -g rg-prd-zammad --image crp
 az containerapp job start  -n cajob-prd-zammad-init -g rg-prd-zammad
 ```
 
-Post-install / post-version-bump (Rails console via `exec`). See `docs/features/post-install.md` for the full runbook:
+Post-install / post-version-bump (Rails runner via `exec`). See `docs/features/post-install.md` for the full runbook. Two gotchas learned at DA-92 binding:
+
+- `az containerapp exec` uses `--command "..."` (not `-- <cmd>`); the latter errors with "unrecognized arguments".
+- `--command "rails r ..."` returns `ClusterExecFailure code: 500` from the cluster exec API even when the connection succeeds. Fall back to **interactive shell** (drop the `--command` flag entirely, then run the commands at the prompt).
+- Inside the container, `rails` isn't on `PATH` — use `cd /opt/zammad && bundle exec rails r "..."`.
 
 ```bash
-# es_url is now auto-set by the upstream entrypoint from ELASTICSEARCH_HOST/PORT
-# env vars (set in apps.tf via local.opensearch_host). Override here only if you
-# need to point Rails at a different ES instance than the init bootstrap.
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('storage_provider', 'File')"
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('fqdn', 'operations.plugport.no')"
-az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-  -- rails r "Setting.set('http_type', 'https')"
+# Open an interactive shell into the web container
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad --container web
+# ...then inside the shell:
+cd /opt/zammad
+bundle exec rails r "Setting.set('storage_provider', 'File')"
+bundle exec rails r "Setting.set('fqdn', 'operations.plugport.no')"
+bundle exec rails r "Setting.set('http_type', 'https')"
+# Verify:
+bundle exec rails r "puts Setting.get('fqdn'); puts Setting.get('http_type')"
+exit  # then Ctrl+D to close az exec
 ```
+
+Note: `es_url` is auto-set by the upstream entrypoint from `ELASTICSEARCH_HOST`/`PORT` env vars (set in apps.tf via `local.opensearch_host`). Override only if you need to point Rails at a different ES instance than the init bootstrap.
 
 Postgres:
 
