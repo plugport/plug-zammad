@@ -61,6 +61,7 @@ The original bootstrap prompt in `docs/claude-md-bootstrap.md` named several thi
 - `CI - Terraform Plan` workflow in `evinyacp/az-0265-infra` returns `startup_failure` on every PR-time trigger. `CD - Terraform Apply` on push-to-main works. We post `terraform plan` output as a PR comment manually; see `docs/features/infra-runbook.md`. See DA-95.
 - KV `public_network_access_enabled = false`. `azurerm_key_vault_secret` (data plane) is unreachable from CI runners and dev laptops. Secrets are written via `azapi_resource` against the ARM control plane (DELETE via that endpoint is not supported — use `terraform state rm` for renames). See DA-95.
 - Postgres FS soft-delete is 7 days; Storage account soft-delete ~14 days; Key Vault purge-protected with 90-day soft-delete. The four `-ne`-suffixed resources exist because their pre-migration WEU siblings still hold the names.
+- `azurerm_container_app.secret.key_vault_secret_id` is a static URI string — Terraform sees no implicit dep on the underlying `azapi_resource "Microsoft.KeyVault/vaults/secrets@..."`. When introducing a new KV secret via the azapi control plane *and* referencing it from a Container App in the same apply, you must add explicit `depends_on = [azapi_resource.secret_*]` to the Container App, or the apply races and Azure rejects the secret-block update with `Unable to get value using Managed identity ... for secret <name>`. See DA-91 (PR #30).
 
 ### Linear
 
@@ -77,7 +78,7 @@ DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, dep
 DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
 DA-92 Custom domain + TLS     🟡 In Refinement (next up — unblocked by DA-90)
 DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
-DA-91 Azure OpenAI            🟡 In Refinement
+DA-91 Azure OpenAI            🔵 In Progress (infra PRs #29, #30 applied — deploy rolling)
 DA-85 SMTP decision           🟡 In Refinement
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
 ```
