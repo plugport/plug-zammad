@@ -105,19 +105,34 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Force a new revision on every roll, even when the image SHA
+          # matches the current revision's image (DA-113). Without a
+          # suffix, `az containerapp update --image <same-sha>` is a
+          # no-op — but Terraform may have changed env/secrets/template
+          # in between deploys without rolling a new revision itself, so
+          # the stale revision keeps serving with the new app-level spec
+          # bypassed. A unique suffix per CI run guarantees a fresh
+          # revision regardless. Format: `ci-<12-char-sha>-<epoch>`
+          # (≤26 chars, well under ACA's 64-char total revision-name cap
+          # for our `ca-prd-zammad-web--` prefix).
+          SUFFIX="ci-${SHA:0:12}-$(date +%s)"
+          echo "Revision suffix: $SUFFIX"
+
           # `ca-prd-zammad-web` has two containers: the Rails app (`web`) and
           # an nginx sidecar (`nginx`) — both run our Zammad image with
           # different `args`. `az containerapp update --image` only patches
           # the first container, and using `--container-name` twice creates
           # two revisions per deploy. Cleaner: dump the current spec, patch
-          # both container images with yq, and re-apply atomically.
+          # both container images + revisionSuffix with yq, re-apply
+          # atomically.
           echo "::group::Update ca-prd-zammad-web (web + nginx sidecar)"
           TMP=$(mktemp --suffix=.yaml)
           az containerapp show -n ca-prd-zammad-web -g "$RG" -o yaml > "$TMP"
           YQ_EXPR='(.properties.template.containers[] | '
           YQ_EXPR+='select(.name == "web" or .name == "nginx") | .image) '
-          YQ_EXPR+='= strenv(NEW_IMAGE)'
-          NEW_IMAGE="$IMAGE:$SHA" yq -i "$YQ_EXPR" "$TMP"
+          YQ_EXPR+='= strenv(NEW_IMAGE) | '
+          YQ_EXPR+='.properties.template.revisionSuffix = strenv(SUFFIX)'
+          NEW_IMAGE="$IMAGE:$SHA" SUFFIX="$SUFFIX" yq -i "$YQ_EXPR" "$TMP"
           az containerapp update -n ca-prd-zammad-web -g "$RG" --yaml "$TMP"
           echo "::endgroup::"
 
@@ -126,7 +141,8 @@ jobs:
             echo "::group::Update $APP"
             az containerapp update \
               -n "$APP" -g "$RG" \
-              --image "$IMAGE:$SHA"
+              --image "$IMAGE:$SHA" \
+              --revision-suffix "$SUFFIX"
             echo "::endgroup::"
           done
 
