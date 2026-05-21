@@ -145,8 +145,10 @@ jobs:
           # Zammad revision is the one answering — checking that the active
           # revision points at the SHA we just pushed.
           # JMESPath fragments kept on their own lines to satisfy yamllint's
-          # 120-char ceiling.
-          ACTIVE_QUERY="[?properties.trafficWeight==\`100\` && properties.healthState=='Healthy']"
+          # 120-char ceiling. healthState can be `None` (probes still
+          # evaluating, common in the first minutes after a roll) or
+          # `Healthy`; only `Unhealthy` should disqualify a revision here.
+          ACTIVE_QUERY="[?properties.trafficWeight==\`100\` && properties.healthState!='Unhealthy']"
           ACTIVE_QUERY+=".properties.template.containers[0].image | [0]"
           for i in $(seq 1 30); do
             ACTIVE_IMAGE=$(az containerapp revision list \
