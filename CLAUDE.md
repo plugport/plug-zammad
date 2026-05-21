@@ -77,7 +77,7 @@ DA-89 Terraform apps          ✅ Done
 DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, deploy.yml — green E2E)
 DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
 DA-92 Custom domain + TLS     ✅ Done (operations.plugport.no bound 2026-05-21, DigiCert managed cert, Zammad fqdn+http_type set)
-DA-93 SSO go-live             🔵 In Progress (Entra app reg + SSO sign-in live; break-glass admin + disable local login pending)
+DA-93 SSO go-live             ✅ Done (Entra app reg + SSO sign-in + Third-party-login-only live; break-glass via Rails-exec, formell 1Password-vei sporet i DA-121)
 DA-91 Azure OpenAI            ✅ Done (infra live, worker rolled — manual Setting.set still pending per ai.md)
 DA-85 SMTP decision           🟡 In Refinement
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
