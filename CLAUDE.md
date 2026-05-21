@@ -78,7 +78,7 @@ DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, dep
 DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
 DA-92 Custom domain + TLS     🟡 In Refinement (next up — unblocked by DA-90)
 DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
-DA-91 Azure OpenAI            🔵 In Progress (infra PRs #29, #30 applied — deploy rolling)
+DA-91 Azure OpenAI            ✅ Done (infra live, worker rolled — manual Setting.set still pending per ai.md)
 DA-85 SMTP decision           🟡 In Refinement
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
 ```
