@@ -88,7 +88,7 @@ DA-95 Eviny escalations       🔵 In Progress (samleboks)
 Zammad is **live** at https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.azurecontainerapps.io/ — `<title>Zammad Helpdesk</title>`, healthy revision on `crprdzammad.azurecr.io/zammad:<sha>`, `/api/v1/getting_started` returns 200. Six long-running Container Apps + the init job all carry the real Zammad image and Plug's env/secret refs.
 
 Next up:
-- **DA-92** — custom domain `operations.plugport.no` + Let's Encrypt managed cert on `ca-prd-zammad-web`. Needs the DNS change in `evinyacp/eviny-dns` (CNAME + asuid TXT) and a portal/CLI bind. See `docs/features/dns-tls.md`.
+- **DA-92** — custom domain `operations.plugport.no` + DigiCert-issued managed cert on `ca-prd-zammad-web`. ACA managed certs are issued by DigiCert (CN `GeoTrust TLS RSA CA G1`), NOT Let's Encrypt — verified live 2026-05-21 after binding. ~180-day validity, Azure auto-renews ~45 days before expiry as long as the CNAME + asuid TXT records stay in `eviny-dns`. See `docs/features/dns-tls.md`.
 - **DA-93** — Entra SSO go-live: app reg in the Plug tenant, paste client secret from KV into the Zammad admin UI, disable local password login. Blocked by DA-92 (the redirect URI is the public FQDN). See `docs/features/sso-entra.md`.
 
 Lower-priority follow-ups, no Linear issues yet:
@@ -129,7 +129,7 @@ Traffic flow:
                                           ▼
                           ┌──────────────────────────────┐
    Entra ID (OIDC)  ◄──── │  Container Apps ingress      │  TLS: managed cert
-                          │  (HSTS, CSP, X-Frame-Options)│  (Path A — Let's Encrypt)
+                          │  (HSTS, CSP, X-Frame-Options)│  (Path A — DigiCert via ACA)
                           └─────────────┬────────────────┘
                                         │
    ╔══════════════════════════════════════╪═══════════════════════════════════════╗
@@ -374,7 +374,7 @@ See `docs/features/sso-entra.md`.
 
 ## 9. DNS + TLS
 
-**Path A** — Container Apps managed certificate (Let's Encrypt). Path B (Front Door + WAF) is tracked as a future option, see `docs/features/dns-tls.md`.
+**Path A** — Container Apps managed certificate (DigiCert, ~180-day validity, auto-renewed by Azure). Path B (Front Door + WAF) is tracked as a future option, see `docs/features/dns-tls.md`.
 
 ### DNS
 
@@ -389,7 +389,7 @@ See `docs/features/sso-entra.md`.
 
 1. Azure Portal → `ca-prd-zammad-web` → Custom domains → Add custom domain → `operations.plugport.no`.
 2. Validation via the `asuid.operations` TXT added above.
-3. Select **Managed certificate** → Azure issues Let's Encrypt cert and rotates automatically.
+3. Select **Managed certificate** → Azure issues a DigiCert cert (`GeoTrust TLS RSA CA G1` chain) and rotates automatically ~45 days before the ~180-day expiry.
 4. Bind the domain.
 
 ### Verification commands
@@ -399,7 +399,7 @@ dig +short operations.plugport.no
 curl -Iv https://operations.plugport.no
 ```
 
-Expect HTTP 200 and a Let's Encrypt-issued certificate.
+Expect HTTP 200 and a DigiCert-issued certificate.
 
 ### Security headers
 
