@@ -109,6 +109,39 @@ rm -f "$BODY"
 
 Open a Linear issue in the `Zammad` project with due-date two weeks before expiry to remind us to rotate.
 
+## 3b. Lock down to Plug employees (Application Assignment)
+
+By default, any user in the Eviny tenant can sign in to `Plug Zammad` and auto-create a Zammad account (because Zammad's `auth_third_party_no_create_user` is off). We restrict at the Entra level so only members of the `S-Plug AS` dynamic security group can authenticate against the app at all.
+
+Group reference:
+- `S-Plug AS` (object ID `bf09da25-425f-4a48-8bf2-2dcaed49986e`)
+- Type: Security group, dynamic membership
+- Membership rule: HR-driven — `accountEnabled=true`, `employeeId` set, `extensionAttribute7 startsWith "Eviny konsern;Plug AS"`, excludes onboarding/leaver statuses
+
+DA-123 verified that the app-reg owner (Eyvind) has enough rights to do this directly via Graph API — **no Application Administrator or Eviny IT escalation needed**. The two ops:
+
+```bash
+APP_ID=6a0ccd3c-7548-4339-ba04-4c8a11ddd7c2
+SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+GROUP_ID=bf09da25-425f-4a48-8bf2-2dcaed49986e
+
+# 1) Turn on "Assignment required"
+az rest --method patch \
+  --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$SP_ID" \
+  --headers "Content-Type=application/json" \
+  --body '{"appRoleAssignmentRequired": true}'
+
+# 2) Assign S-Plug AS to the app's default role
+az rest --method post \
+  --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$SP_ID/appRoleAssignedTo" \
+  --headers "Content-Type=application/json" \
+  --body "{\"principalId\":\"$GROUP_ID\",\"resourceId\":\"$SP_ID\",\"appRoleId\":\"00000000-0000-0000-0000-000000000000\"}"
+```
+
+After this, non-Plug Eviny users get `AADSTS50105` when trying to sign in via the Microsoft button — they never reach Zammad. Zammad's "No user creation on logon" stays OFF so legitimate Plug employees still auto-provision on first sign-in.
+
+The same pattern applies to the future `Plug Zammad Mail` app (DA-85) — reuse the same `S-Plug AS` group + own-the-SP path.
+
 ## 4. Configure Zammad
 
 Sign in to Zammad as an existing admin. Navigate via admin search ("microsoft" or "office365") or directly to **Settings → Security → Third-party Applications → Microsoft**:

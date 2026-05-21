@@ -379,6 +379,12 @@ Microsoft Graph delegated:
 
 Admin consent **requires `Application Administrator` / `Cloud Application Administrator` / `Global Administrator`** in the Eviny tenant. Plug users don't have these by default — escalate to Eviny IT via samleboks (`az ad app permission admin-consent --id <appId>`), or test first whether the tenant allows user-level consent for these basic scopes (it usually does).
 
+### Access lockdown — Application Assignment + S-Plug AS
+
+The app is restricted to members of `S-Plug AS` (object ID `bf09da25-425f-4a48-8bf2-2dcaed49986e`), an Eviny-managed dynamic security group whose membership rule pulls in active Plug employees from HR data. `appRoleAssignmentRequired = true` on the SP so Entra blocks non-members at the OIDC layer (`AADSTS50105`).
+
+Important: the **app-reg / SP owner can manage assignment-required + group assignments via Graph API** without Application Administrator. We did this in DA-123 without Eviny IT escalation. Same trick applies to future apps like `Plug Zammad Mail` (DA-85) — keep Eyvind as SP owner and the assignment plumbing is self-serve.
+
 ### Optional: group claim
 
 To map AD groups → Zammad roles automatically, enable groups claim (Security groups → ID + access token). Mapping handled either by a Ruby post-login hook (path documented in `docs/features/sso-entra.md`) or kept manual in Zammad admin.
