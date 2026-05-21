@@ -108,6 +108,33 @@ az backup restore restore-azurefileshare \
   --resolve-conflict Overwrite
 ```
 
+## Elasticsearch (opensearch app) recovery
+
+`ca-prd-zammad-opensearch` runs ephemerally — there's no persistent volume (DA-111 decision; Container Apps doesn't offer a workable persistent-storage option for single-instance ES, see `evinyacp/az-0265-infra/infrastructure/apps.tf` comment above the resource). Whenever the opensearch container restarts (Terraform spec change, infra maintenance, OOM kill), the ES index is gone.
+
+**Symptom**: search returns empty in Zammad UI; cluster health is green but no indices.
+
+**Recovery**: trigger the reindex job (DA-106).
+
+```bash
+# 1. Push the current image into the reindex job spec (works around the
+#    `az containerapp job start --image` template-clobber bug, DA-107).
+LATEST=$(az containerapp show -n ca-prd-zammad-web -g rg-prd-zammad \
+  --query 'properties.template.containers[?name==`web`].image | [0]' -o tsv)
+az containerapp job update -n cajob-prd-zammad-reindex -g rg-prd-zammad \
+  --image "$LATEST"
+
+# 2. Start the reindex execution
+az containerapp job start -n cajob-prd-zammad-reindex -g rg-prd-zammad
+
+# 3. Watch logs (reindex typically takes 5–30 min depending on ticket volume)
+az containerapp job execution list -n cajob-prd-zammad-reindex -g rg-prd-zammad \
+  --query 'reverse(sort_by([], &properties.startTime))[0].name' -o tsv
+# then `az containerapp job logs show ...`
+```
+
+The job runs `bundle exec rake zammad:searchindex:rebuild` which drops the existing index and rebuilds from Postgres. Search starts returning hits as documents stream in.
+
 ## Key Vault recovery
 
 KV is purge-protected. A "deleted" KV is recoverable for 90 days:
