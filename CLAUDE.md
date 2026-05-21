@@ -77,7 +77,7 @@ DA-89 Terraform apps          ✅ Done
 DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, deploy.yml — green E2E)
 DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
 DA-92 Custom domain + TLS     ✅ Done (operations.plugport.no bound 2026-05-21, DigiCert managed cert, Zammad fqdn+http_type set)
-DA-93 SSO go-live             🟡 In Refinement (blocked by DA-92)
+DA-93 SSO go-live             🔵 In Progress (Entra app reg + SSO sign-in live; break-glass admin + disable local login pending)
 DA-91 Azure OpenAI            ✅ Done (infra live, worker rolled — manual Setting.set still pending per ai.md)
 DA-85 SMTP decision           🟡 In Refinement
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
@@ -89,7 +89,7 @@ Zammad is **live** at https://ca-prd-zammad-web.orangemoss-71bfd191.norwayeast.a
 
 Next up:
 - **DA-92** — custom domain `operations.plugport.no` + DigiCert-issued managed cert on `ca-prd-zammad-web`. ACA managed certs are issued by DigiCert (CN `GeoTrust TLS RSA CA G1`), NOT Let's Encrypt — verified live 2026-05-21 after binding. ~180-day validity, Azure auto-renews ~45 days before expiry as long as the CNAME + asuid TXT records stay in `eviny-dns`. See `docs/features/dns-tls.md`.
-- **DA-93** — Entra SSO go-live: app reg in the Plug tenant, paste client secret from KV into the Zammad admin UI, disable local password login. Blocked by DA-92 (the redirect URI is the public FQDN). See `docs/features/sso-entra.md`.
+- **DA-93** — Entra SSO go-live: app reg in the Eviny tenant, OmniAuth `microsoft_office365` (NOT `_v2`) configured in Zammad admin UI, auto-link enabled, sign-in confirmed end-to-end. Still pending: break-glass local-password admin documented + 1Password entry, then flip "Third-party login only". See `docs/features/sso-entra.md`.
 
 Lower-priority follow-ups, no Linear issues yet:
 - nginx sidecar on `ca-prd-zammad-web` — needs sidecar-aware `az containerapp update --container-name` loop in `deploy.yml`.
@@ -98,6 +98,20 @@ Lower-priority follow-ups, no Linear issues yet:
 ---
 
 ## 1. Architecture
+
+### Design principles
+
+**Upgrade-friendliness is load-bearing.** Zammad ships ~monthly. Every version bump must be:
+
+1. **A single value change** — bump `ZAMMAD_VERSION` in `Dockerfile`, push, deploy.
+2. **No image surgery** — the `Dockerfile` is a thin wrapper (`FROM ghcr.io/zammad/zammad:${ZAMMAD_VERSION}` + LABELs). Never add `RUN`, `COPY`, or anything that modifies the upstream image. If a Zammad-version-specific patch is unavoidable, file it upstream first.
+3. **Customization lives at runtime** — Plug-specific config goes via env vars (`apps.tf` `env`), Container Apps secret refs (KV), volume mounts (AzureFile shares), or Rails `Setting.set` in Postgres. Never bake it into the image.
+4. **No coupling to internal upstream paths** that aren't part of Zammad's docker contract. If we depend on `/opt/zammad/<x>`, it must be a path Zammad documents as part of its container contract (volumes, env vars, dispatcher commands). When in doubt, check `zammad/zammad-docker-compose`.
+5. **One source of truth per concern.** The Container App spec (apps.tf) owns runtime; the upstream image owns Zammad itself; secrets live in Key Vault; long-lived state lives in Postgres or Azure Files. No layered overrides between these.
+
+Why: a custom Dockerfile that gets stale across Zammad versions becomes an integration-test burden, blocks security patches behind manual diff work, and makes rollback fragile. The pre-existing `nginx sidecar startup` regression (DA-117) is a cautionary tale — we depended on cross-container behaviour that upstream solves via a shared docker volume and we missed mirroring on Container Apps.
+
+### Process layout
 
 Zammad is a Rails application split into several long-running processes, a search engine, a cache, and a one-off init job. On Azure Container Apps each process runs as its own Container App in resource group `rg-prd-zammad` (subscription `az-0265-online-plugas-prd-prd-ammad` — name set by Eviny ACP; the typo `ammad` is locked, use the subscription **ID** as source of truth in scripts). Image pin: `ghcr.io/zammad/zammad:7.0.1-0045` (upstream-canonical via `IMAGE_REPO` default in `zammad/zammad-docker-compose/.env.dist`; Docker Hub `zammad/zammad` mirrors the same content). Architecture mirrors the upstream `zammad-docker-compose` services.
 
@@ -330,25 +344,27 @@ After every push to `main`, check the CI/CD workflow logs for warnings and depre
 
 ## 8. SSO (Entra ID)
 
-Zammad requires Entra ID login for all users. OIDC via Zammad's built-in Microsoft (Office 365) v2 strategy.
+Zammad requires Entra ID login for all users. OIDC via Zammad's built-in Microsoft OmniAuth strategy. The strategy is named `microsoft_office365` (no `_v2` suffix — early drafts of this doc said v2 but that name doesn't exist in the codebase) and the admin-UI label is just **Microsoft**.
+
+### Tenant
+
+Plug users (`@plugport.no`) are native in the **Eviny AS** Entra tenant (`12f1bdca-9eec-45f6-a63e-2061b957e8ee`), not B2B guests from a separate Plug tenant. App Registration goes in the Eviny tenant.
 
 ### App Registration
 
-Created in the Plug Entra tenant:
-
 - **Name**: `Plug Zammad`
+- **App (client) ID**: `6a0ccd3c-7548-4339-ba04-4c8a11ddd7c2`
 - **Account types**: Accounts in this organizational directory only
-- **Redirect URI (Web)**: `https://operations.plugport.no/auth/microsoft_office365_v2/callback` — this is Zammad's hard-coded OmniAuth callback path; do not change.
+- **Redirect URI (Web)**: `https://operations.plugport.no/auth/microsoft_office365/callback` — Zammad's hard-coded OmniAuth callback path; do not change.
 
-Captured values:
-- Application (client) ID — public, can be referenced in code/docs.
-- Directory (tenant) ID — public.
+Created via `az ad app create` + `az ad sp create` (Plug users can do this without elevated roles).
 
 ### Client secret
 
 - Created with 24-month expiry. Linear reminder issue in `Zammad` project, due two weeks before expiry.
-- Stored in Key Vault as `entra-zammad-client-secret`.
-- **Not** surfaced as a runtime env var. Zammad's Microsoft (Office 365) v2 strategy is configured in the admin UI (Settings → Security → Third Party Applications). At initial setup, retrieve the secret from Key Vault and paste it into the admin form. Rotation = retrieve new secret → paste again.
+- Stored in Key Vault as `kv-prd-zammad-ne/entra-zammad-client-secret`.
+- Written via ARM control plane (`az rest ... PUT .../Microsoft.KeyVault/vaults/.../secrets/...`) because the vault has `public_network_access_enabled = false`. Same azapi pattern as DA-91.
+- **Not** surfaced as a runtime env var. Zammad's Microsoft strategy is configured in the admin UI (Settings → Security → Third-party Applications → Microsoft). At initial setup, retrieve the secret from KV (or read from the worker container's env if you don't have Secrets User role on the vault) and paste it into the admin form. Rotation = `az ad app credential reset --append` → new value → KV PUT → paste again.
 
 ### API permissions
 
@@ -361,7 +377,7 @@ Microsoft Graph delegated:
 | `email` | Email claim (Zammad user identifier) |
 | `User.Read` | Read signed-in user's basic profile |
 
-Admin consent granted for the tenant.
+Admin consent **requires `Application Administrator` / `Cloud Application Administrator` / `Global Administrator`** in the Eviny tenant. Plug users don't have these by default — escalate to Eviny IT via samleboks (`az ad app permission admin-consent --id <appId>`), or test first whether the tenant allows user-level consent for these basic scopes (it usually does).
 
 ### Optional: group claim
 
@@ -369,11 +385,16 @@ To map AD groups → Zammad roles automatically, enable groups claim (Security g
 
 ### Zammad configuration
 
-In Zammad admin → Settings → Security → Third Party Applications → Microsoft (Office 365):
+In Zammad admin → Settings → Security → Third-party Applications → **Microsoft**:
 
-- Paste App ID, App Secret, Tenant ID
-- Enable automatic account link on initial sign-in, matched on email
-- Once SSO works end-to-end: Admin → Settings → Security → Base → "Third-party login only" to disable local password form
+- Paste App ID, App Secret, App Tenant ID
+- Save
+- Also enable `auth_third_party_auto_link_at_inital_login` (note Zammad's upstream typo: "inital"). Without it, the first SSO sign-in fails with `422 Email address X is already used for another user` because Zammad tries to create a new user instead of linking the Microsoft identity to the existing local admin.
+- Once SSO works end-to-end **and** a break-glass local-password admin is in place (see `docs/features/sso-entra.md` §6): Settings → Security → Base → "Third-party login only" to disable local password form.
+
+### Prerequisite: HTTPS scheme through nginx sidecar
+
+OIDC requires `https://` in the `redirect_uri` Entra receives back from the OAuth callback. That depends on Rails generating HTTPS URLs, which depends on `X-Forwarded-Proto: https` reaching Rails. Both are wired up in `apps.tf`: `NGINX_SERVER_SCHEME=https` on the nginx sidecar + `127.0.0.1` in `RAILS_TRUSTED_PROXIES` (the nginx-to-Rails localhost hop). Don't remove either without checking — DA-119 was filed and fixed exactly this regression.
 
 ### Full walkthrough
 

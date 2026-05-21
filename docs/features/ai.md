@@ -27,43 +27,89 @@ Implication: the `reply` (gpt-4.1) deployment is unused by Zammad in 7.0.x — w
 
 ## Initial activation
 
-Once the infra is live (verify with `az cognitiveservices account show -n oai-prd-zammad -g rg-prd-zammad` returns `provisioningState: Succeeded`):
+Once the infra is live (verify with `az cognitiveservices account show -n oai-prd-zammad -g rg-prd-zammad` returns `provisioningState: Succeeded`), do this from the Zammad admin UI — Zammad 7 exposes the full AI Provider form so Rails console isn't needed.
 
-1. Pull the API key and endpoint from Key Vault (`mi-prd-zammad-apps` already has Secrets User):
+### Step 1: Get the credentials
 
-   ```bash
-   API_KEY=$(az keyvault secret show --vault-name kv-prd-zammad-ne \
-     --name azure-openai-api-key --query value -o tsv)
-   ENDPOINT=$(az keyvault secret show --vault-name kv-prd-zammad-ne \
-     --name azure-openai-endpoint --query value -o tsv)
-   ```
+The endpoint is deterministic and not secret:
 
-2. Configure Zammad via Rails console on the web container. The OCR field can stay unset until we wire image-OCR support; embeddings likewise. The chat-completions URL must include the **deployment name** (`summary`) and an API version pinned to a recent stable value:
+```
+https://oai-prd-zammad.openai.azure.com/
+```
 
-   ```bash
-   az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-     --container web -- rails r "
-       Setting.set('ai_provider', 'azure')
-       Setting.set('ai_provider_config', {
-         token: '$API_KEY',
-         url_completions: '$ENDPOINT' + 'openai/deployments/summary/chat/completions?api-version=2024-08-01-preview'
-       })
-     "
-   ```
+The API key is in Key Vault as `kv-prd-zammad-ne/azure-openai-api-key`. Two ways to retrieve it:
 
-3. Enable per-feature toggles. Each is a separate Setting per the seed schema (`db/seeds/settings.rb`):
+- **From Key Vault** (requires `Key Vault Secrets User` role on the vault — Plug users typically don't have it by default; ask Eviny IT or use the worker-container path below):
 
-   ```bash
-   az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad \
-     --container web -- rails r "
-       Setting.set('ai_assistance_ticket_summary', true)
-       Setting.set('ai_assistance_text_tools', true)
-     "
-   ```
+  ```bash
+  az keyvault secret show --vault-name kv-prd-zammad-ne \
+    --name azure-openai-api-key --query value -o tsv
+  ```
 
-4. Verify in the admin UI: **Settings → System → AI** shows the provider as `Azure` with the endpoint visible.
+- **From the worker container** (the worker's MI has Secrets User; the key is mounted as an env var):
 
-5. Smoke-test from the agent UI: open any ticket → the summary panel should render within a couple of seconds. If it doesn't, check `ca-prd-zammad-worker` console logs (`az containerapp logs show -n ca-prd-zammad-worker -g rg-prd-zammad --follow`) — `AI::Provider::Azure` log facility surfaces auth / endpoint errors.
+  ```bash
+  az containerapp exec -n ca-prd-zammad-worker -g rg-prd-zammad --container worker
+  # inside the pod:
+  echo "Endpoint: $AZURE_OPENAI_ENDPOINT"
+  echo "API key:  $AZURE_OPENAI_API_KEY"
+  ```
+
+### Step 2: Configure the AI Provider in admin UI
+
+In Zammad admin, search for "AI" or navigate to **Settings → AI → AI Provider**. The Provider dropdown has multiple Azure options — pick **"Azure AI (legacy deployment-based endpoints)"**. The "legacy" label refers to the named-deployment URL pattern (`openai/deployments/<name>/chat/completions?api-version=...`) — which is exactly what our `openai.tf` provisions. It is stable and not being sunset; the non-legacy "Foundry endpoints" option is for a different routing model we don't use.
+
+Fill in:
+
+| Field | Value |
+|---|---|
+| Provider | `Azure AI (legacy deployment-based endpoints)` |
+| Token | API key from step 1 |
+| URL Completions | `https://oai-prd-zammad.openai.azure.com/openai/deployments/summary/chat/completions?api-version=2024-08-01-preview` |
+| URL Embeddings | (leave blank — no embeddings deployment) |
+| URL OCR | (leave blank — no vision deployment) |
+
+Save. If config is valid, Zammad shows a "verified" status; if not, copy the error and check the worker logs.
+
+### Step 3: Enable per-feature assistance
+
+Same admin area (or sub-page **AI → AI Assistance**):
+
+- **Ticket Summary** → On
+- **Writing Assistant** → On
+
+### Step 4: Smoke-test
+
+Open any ticket — the summary panel should render within a couple of seconds. The Writing Assistant menu (the small ✨ button on reply forms) should offer "Improve writing", "Simplify", "Translate", etc.
+
+If something fails, the worker container is where AI jobs run:
+
+```bash
+az containerapp logs show -n ca-prd-zammad-worker -g rg-prd-zammad --follow
+```
+
+`AI::Provider::Azure` is the log facility for auth/endpoint errors.
+
+### Alternative: Rails console activation
+
+Same effect as the UI, useful for scripted re-config or when admin UI isn't reachable:
+
+```bash
+az containerapp exec -n ca-prd-zammad-web -g rg-prd-zammad --container web
+# inside the pod:
+cd /opt/zammad
+bundle exec rails r "
+  Setting.set('ai_provider', 'azure')
+  Setting.set('ai_provider_config', {
+    'token' => 'PASTE_KEY_HERE',
+    'url_completions' => 'https://oai-prd-zammad.openai.azure.com/openai/deployments/summary/chat/completions?api-version=2024-08-01-preview'
+  })
+  Setting.set('ai_assistance_ticket_summary', true)
+  Setting.set('ai_assistance_text_tools', true)
+"
+```
+
+Note: `az containerapp exec --command "..."` returns `ClusterExecFailure code 500` for `rails r` — use the interactive shell path (no `--command` flag), then run `bundle exec rails r "..."` at the in-pod prompt. Also, `rails` is not on `PATH` — go through `/opt/zammad` and `bundle exec`.
 
 ## Permissions matrix
 
