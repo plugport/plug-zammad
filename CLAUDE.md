@@ -77,11 +77,15 @@ DA-89 Terraform apps          ✅ Done
 DA-90 Dockerfile + CI         ✅ Done (PR #9, #11, #12: Dockerfile, ci.yml, deploy.yml — green E2E)
 DA-96 apps.tf container state ✅ Done (infra PRs #10, #11, #12, #13: command/env/secrets/registry/FQDN)
 DA-92 Custom domain + TLS     ✅ Done (operations.plugport.no bound 2026-05-21, DigiCert managed cert, Zammad fqdn+http_type set)
-DA-93 SSO go-live             ✅ Done (Entra app reg + SSO sign-in + Third-party-login-only live; break-glass via Rails-exec, formell 1Password-vei sporet i DA-121)
-DA-91 Azure OpenAI            ✅ Done (infra live, worker rolled — manual Setting.set still pending per ai.md)
-DA-85 SMTP decision           🟡 In Refinement
+DA-93 SSO go-live             ✅ Done (Entra app reg + SSO + S-Plug AS Assignment Required + Third-party-login-only live)
+DA-91 Azure OpenAI            ✅ Done (infra live, AI provider + ticket-summary + writing-assistant aktivert i Zammad UI)
+DA-85 M365 email-kanal        🟡 In Refinement (rewritten scope: M365 IMAP in+out + separat notification-relay)
 DA-95 Eviny escalations       🔵 In Progress (samleboks)
 ```
+
+**Go-live followups (2026-05-21 → 2026-05-22), alle Done:** DA-97 (probes), DA-98 (nginx-sidecar config), DA-110 (init→opensearch port), DA-111 (ES storage decision), DA-112 (memcached TCP), DA-113 (deploy --revision-suffix), DA-114 (cert-renewal-failed alert), DA-116 (HSTS via sidecar Secret-mount), DA-117 (sidecar Rails env), DA-118 (KQL cert-expiring-soon backstop), DA-119 (X-Forwarded-Proto + RAILS_TRUSTED_PROXIES localhost), DA-123 (Entra Application Assignment to S-Plug AS).
+
+**Open followups:** DA-115 (cert auto-renew sanity-check, due 2026-10-15), DA-120 (Entra secret rotation, due 2028-05-07), DA-121 (formell break-glass i 1Password, Low — Rails-exec dekker akutt), DA-122 (Reviewer-permissions på Inbox/Zammad-mappe, Low — tas etter DA-85).
 
 ### What's next
 
@@ -437,11 +441,11 @@ Expect HTTP 200 and a DigiCert-issued certificate.
 
 ### Security headers
 
-Zammad sends:
+Response headers as observed live on `https://operations.plugport.no/` after DA-116/DA-117:
 
-- `Strict-Transport-Security: max-age=31536000; includeSubDomains`
-- `X-Frame-Options: DENY`
-- `Content-Security-Policy` — Zammad default; document any overrides in `docs/features/dns-tls.md`.
+- `Strict-Transport-Security: max-age=31536000; includeSubDomains` — injected by nginx sidecar via a single-file Container Apps `Secret`-volume mounted at `/etc/nginx/conf.d/hsts.conf`. Not from Rails. Don't enable `preload` without a multi-week commitment (rollback from preload-list is slow).
+- `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Content-Security-Policy` (Zammad default) — from Rails.
+- `server: nginx` — confirms the sidecar is in path. If you ever see no `server` header or a Rails-style one, DA-117-style regression is back.
 
 ## 10. Backups + monitoring
 
@@ -470,7 +474,13 @@ Hybrid model:
 
 Full runbook: `docs/features/staging.md`.
 
-SMTP for outbound mail is **TBD** — tracked as Linear issue under the `Zammad` project. Default `.env.example` documents the env-var contract; production will not deliver mail until the decision is made and secrets are populated.
+**Email channel is DA-85**, currently in Refinement. Design lock (verified against Zammad admin-docs + upstream entrypoint):
+
+- **Inbound + outbound ticket-mail** via Zammad's native Microsoft 365 IMAP channel (OAuth/XOAUTH2 against `operations@plugport.no`). Separate Entra app reg `Plug Zammad Mail` with `IMAP.AccessAsUser.All` + `SMTP.Send` + 4 OIDC scopes.
+- **Outbound system notifications** (welcome mail, password reset, agent notifications) via a **separate** SMTP relay — not M365. Upstream Zammad docs explicitly warn that automated outgoing via a Microsoft account risks suspension once sending limits are hit. Relay options A/B/C laid out in DA-85; current lean is (A) Azure Communication Services Email for stack consistency.
+- **Operations@ stays usable in Outlook** — Exchange mailflow-rule moves all incoming mail to an `Inbox/Zammad` subfolder; Zammad polls that subfolder; Outlook-users still see all history. Reviewer-permissions on the subfolder (DA-122, Low pri followup) prevents dual-handling during Zammad outages.
+
+See DA-85 for the full implementation plan and the IT-coordination items (mailbox-type, SMTP AUTH status, mailflow-rule, admin consent).
 
 ## 12. Sizing baseline
 
